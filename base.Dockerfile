@@ -32,6 +32,13 @@ ARG DEBIAN_FRONTEND=noninteractive
 
 # PATH 写死而不用 ${PATH} 拼，避免上游镜像改基础 PATH 时这里悄悄变化。
 # /opt/agents、/usr/local/go、/opt/rust 都是本文件后面装进去的。
+#
+# NPM_CONFIG_CACHE 特意指到 /var/tmp（镜像层里，不在任何卷里）：
+# npm 默认把缓存放 $HOME/.npm，而 $HOME 在运行时是命名卷 ——
+# 卷只在「第一次创建」时从镜像里拷一份内容，之后镜像怎么改都不影响它。
+# 于是构建期 root 写下的 ~/.npm 会被永久固化，运行期 uid=1000 一碰就
+#   npm ERR! code EACCES ... /home/agent/.npm/_cacache
+# 换个跟卷无关的目录，这个坑从根上就没有了（老卷用 `make fixperm` 修一次）。
 ENV HOME=/home/agent \
     GOPATH=/home/agent/go \
     RUSTUP_HOME=/opt/rust/rustup \
@@ -39,6 +46,7 @@ ENV HOME=/home/agent \
     PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     NPM_CONFIG_PREFIX=/opt/agents \
+    NPM_CONFIG_CACHE=/var/tmp/npm-cache \
     NPM_CONFIG_UPDATE_NOTIFIER=false \
     PATH="/opt/agents/bin:/usr/local/go/bin:/opt/rust/cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
@@ -95,16 +103,16 @@ RUN set -eu; \
     useradd --uid "${AGENT_UID}" --gid "${AGENT_GID}" --create-home \
             --home-dir /home/agent --shell /bin/bash agent; \
     mkdir -p /home/agent/work; \
+    install -d -m 1777 /var/tmp/npm-cache; \
     chown -R "${AGENT_UID}:${AGENT_GID}" /home/agent
 
 # agent CLI 装在 /opt/agents（家目录之外）。
 # 放进家目录的话，一旦该目录被挂成卷，卷初始化之后就不会再随镜像更新。
 # 目录对 agent 可写，所以容器里也能 `npm install -g <pkg>` 自由加 CLI。
 #
-# --cache /tmp/... 是必须的：ENV HOME=/home/agent 之后，以 root 跑的 npm 会把缓存
-# 写到 /home/agent/.npm（root 所有）。而家目录挂成卷时，卷第一次创建会把这些文件
-# 复制进去，于是容器里的 agent 永远写不了自己的 npm 缓存 —— 表现为
-# "npm ERR! EACCES ... /home/agent/.npm/_cacache"。构建期把缓存丢到 /tmp 就不会有这层污染。
+# 这里的 --cache 是第二道保险：NPM_CONFIG_CACHE 已经指向 /var/tmp/npm-cache，
+# 但构建期顺手把缓存丢到 /tmp 再删掉，镜像里连缓存都不留。
+# 只要缓存不落在 /home/agent，就不会被卷首建固化，也就不会有 EACCES。
 RUN mkdir -p /opt/agents \
  && if [ -n "$AGENT_CLIS" ]; then \
       echo "==> install agent CLIs: $AGENT_CLIS"; \

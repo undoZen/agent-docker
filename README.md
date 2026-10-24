@@ -342,7 +342,7 @@ token 仍然要校验，但「来自本机」这层信任没有了。所以别�
 不想要转发器：删掉 compose 里的 `MIRASIM_FORWARD_PORT`，把 ports 改回 `…:4939` 即可。
 此时网页能看、配对接口 403，用 `make pair` 取码。
 
-## 四个必须记住的坑
+## 五个必须记住的坑
 
 **1. `bash -lc` 会丢掉 PATH（已被 profile.d 兜住）。**
 Debian 的 `/etc/profile` 把 `PATH` 重置成系统默认值，login shell 一定读它。
@@ -374,14 +374,44 @@ npm ERR! Your cache folder contains root-owned files, due to a bug in
 npm ERR! previous versions of npm which has since been addressed.
 ```
 
-最后那两行是 npm 的通用文案，会把人带偏；真实原因在这里。镜像已经改成构建期
-`--cache /tmp/...` 并在最后一层 `chown -R` 一次，新卷不会有这问题。**已有的卷**
-要一次性修（保留登录态）：
+最后那两行是 npm 的通用文案，会把人带偏；真实原因在这里。镜像做了两处修正：
+
+- `NPM_CONFIG_CACHE=/var/tmp/npm-cache`（镜像层里，不在任何卷里），运行期 npm 根本不碰 `$HOME`；
+- 构建期 npm `--cache /tmp/...` 用完即删，加上最后一层 `chown -R` 兜底。
+
+**新卷**不会有这问题。**已有的卷**（毒已经固化进去了）要修一次，登录态会保留：
 
 ```bash
-docker compose -f variants/mirasim/docker-compose.yml exec -u root mirasim \
-  chown -R 1000:1000 /home/agent
+make fixperm
 ```
+
+**5. `cap_drop: ALL` 之下，uid 0 不是 root。**
+
+这条专门讲为什么上面那一步**不能**写成 `docker compose exec -u root mirasim chown -R ...`：
+
+```bash
+chown: cannot read directory '/home/agent': Permission denied
+```
+
+看着像「root 都没权限？」，其实是权限模型在正常运作。compose 里写了
+`cap_drop: ALL`，容器的 uid 0 手上没有任何 capability，尤其是没有
+`CAP_DAC_OVERRIDE` —— 那个才是「无视文件权限位」的能力。没有它，root 跟普通用户
+一样受 mode bit 约束，连别人 700 的目录都 `readdir` 不了。
+
+所以修卷属主必须**新起一个临时容器**：`docker run` 默认给完整 capability 集合，
+那里的 root 才是真的 root。`make fixperm` 做的就是这件事：
+
+```make
+docker run --rm --user root \
+  -v mirasim-home:/home/agent \
+  -v mirasim-work:/home/agent/work \
+  --entrypoint chown agent-docker-mirasim:1 \
+  -R 1000:1000 /home/agent
+```
+
+（卷名如果被 `.env` 里的 `MIRASIM_HOME_VOLUME` 改过，Makefile 里同名变量也要跟着改。）
+
+一句话：**硬化过的容器里，`-u root` 不等于能改任何人的文件；要特权就得开新容器。**
 
 一句话：家目录凡是会挂卷的，构建期就别以 root 往里写；写了必须在最后一层 chown 回来。
 

@@ -16,7 +16,11 @@ export PATH="/opt/agents/bin:$PATH"
 # .../_cacache。这里提前点出来，并给出可以直接复制的修法。
 if [ -e "$HOME/.npm" ] && [ ! -w "$HOME/.npm" ]; then
   echo "⚠ $HOME/.npm 不可写（属主 $(ls -ld "$HOME/.npm" | awk '{print $3}')，当前 uid $(id -u)）：npm 会报 EACCES" >&2
-  echo "  修：docker compose exec -u root mirasim chown -R $(id -u):$(id -g) $HOME/.npm" >&2
+  # 注意不要写成 `docker compose exec -u root mirasim chown ...`：
+  # 本容器是 cap_drop: ALL 起来的，uid 0 没有 CAP_DAC_OVERRIDE，
+  # 连别人 700 的目录都 readdir 不了，会直接 Permission denied。
+  # 得在宿主上另起一个临时容器（带完整 capability）来做。
+  echo "  修：在宿主机仓库目录执行 make fixperm" >&2
 fi
 
 MIRASIM_BIN="/opt/mirasim/mirasim"

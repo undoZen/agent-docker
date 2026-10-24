@@ -1,6 +1,10 @@
 BASE_TAG ?= agent-docker:1
 MIRASIM_TAG ?= agent-docker-mirasim:1
 VARIANT := variants/mirasim
+# 卷名必须和 compose 里的默认值一致（compose 那边是 ${MIRASIM_HOME_VOLUME:-mirasim-home}）。
+# 如果 .env 里改过名，这里也要跟着改，否则 fixperm 会去 chown 一个空卷。
+MIRASIM_HOME_VOLUME ?= mirasim-home
+MIRASIM_WORK_VOLUME ?= mirasim-work
 
 # base 的构建参数，命令行可覆盖，例如： make base WITH_RUST=0
 AGENT_CLIS ?= @anthropic-ai/claude-code
@@ -18,7 +22,7 @@ AGENT_UID ?= $(shell id -u)
 AGENT_GID ?= $(shell id -g)
 
 .DEFAULT_GOAL := help
-.PHONY: help base mirasim all claude claude-shell up stop logs shell login attach status config down purge egress who check-uid url pair
+.PHONY: help base mirasim all claude claude-shell up stop logs shell login attach status config down purge egress who check-uid url pair fixperm
 
 help:
 	@echo "构建"
@@ -43,6 +47,7 @@ help:
 	@echo ""
 	@echo "维护"
 	@echo "  make who         看镜像内 uid 和宿主 uid 是否对齐（权限问题先看这个）"
+	@echo "  make fixperm     把两个卷的属主改回当前 uid（各种 EACCES 先试这个）"
 	@echo "  make down        删容器、保卷（登录态还在）"
 	@echo "  make purge       连卷一起删（登录态会丢）"
 	@echo "  make egress      挡容器访问内网和云元数据地址"
@@ -144,6 +149,26 @@ purge:
 
 egress:
 	sudo bash $(VARIANT)/egress-lockdown.sh
+
+# 把两个卷的属主改成当前 uid/gid。
+# 什么时候需要：换了 AGENT_UID 重建、或镜像里留下了 root 所有的文件（比如老的 ~/.npm），
+# 表现是容器里各种 EACCES（npm ERR! code EACCES .../_cacache）。
+#
+# 为什么不能用 `docker compose exec -u root mirasim chown -R ...`：
+# 那个容器是 cap_drop: ALL 起来的，uid 0 但没有 CAP_DAC_OVERRIDE，
+# 连别人 700 的目录都 readdir 不了，会报
+#   chown: cannot read directory '/home/agent': Permission denied
+# 所以必须新起一个临时容器 —— 它默认带完整的 capability 集合，root 才是真的 root。
+fixperm:
+	@docker image inspect $(MIRASIM_TAG) >/dev/null 2>&1 || { \
+	  echo "镜像 $(MIRASIM_TAG) 不存在，先 make mirasim"; exit 1; }
+	docker run --rm --user root \
+	  -v $(MIRASIM_HOME_VOLUME):/home/agent \
+	  -v $(MIRASIM_WORK_VOLUME):/home/agent/work \
+	  --entrypoint chown $(MIRASIM_TAG) \
+	  -R $(AGENT_UID):$(AGENT_GID) /home/agent
+	@echo "→ $(MIRASIM_HOME_VOLUME) / $(MIRASIM_WORK_VOLUME) 现在归 $(AGENT_UID):$(AGENT_GID)"
+	@echo "  验证：cd $(VARIANT) && docker compose exec -T mirasim npm view @anthropic-ai/claude-code version"
 
 # 排查文件权限问题的第一步：镜像里的 uid 和宿主 uid 是不是同一个。
 # 不一致的典型症状：bind mount 进来的目录在容器里写不了；或者容器产出的文件
