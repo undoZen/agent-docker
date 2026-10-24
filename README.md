@@ -40,6 +40,7 @@ make up              # 起容器（还没登录，会停在等待状态）
 make login           # 另开一个终端，交互登录
 make attach          # 登录后：打开「接入云端」
 make status          # 看状态
+make url             # 打开本地网页（地址必须带 token，见「网页 401」一节）
 ```
 
 `make login` 需要交互终端（要敲邮箱和邮件验证码）。登录完成后不用重启容器——
@@ -247,6 +248,29 @@ base      ARG AGENT_UID → useradd --uid     ← 固化进 /etc/passwd
    代价是 `/home/agent` 仍然属于 a，`.claude` 配置和 npm 缓存可能报 EACCES。
 
 一句话原则：**构建者的 uid 必须等于使用者的 uid**，对不上就换卷名，或者干脆重建。
+
+## 网页 401：`missing/bad access token`
+
+**不是转发或权限问题，是服务端自己的回环判定。** 请求确实到了服务端（日志里 server 收到了、然后主动拒绝）。
+
+`mirasim serve` 只信任两类请求：同一用户的 unix socket，以及带了 access token 的请求。
+Docker 的端口映射会把来源 IP 换成网桥网关（`172.x.0.1`），于是浏览器被当成远程访问，
+每个请求都要 `?token=`，不带就满屏 `missing/bad access token`。
+
+token 是持久的，存在容器的 `~/.mirasim/run/local-4939.token`（在 `mirasim-home` 卷里，重启不变）：
+
+```bash
+make url      # → http://127.0.0.1:4939/?token=xxxxxxxx
+```
+
+拿到的地址直接贴浏览器。服务端三种投递方式都认：`?token=`、`Authorization: Bearer …`、
+`x-mirasim-token` 头。前端读到 `?token=` 后会存进 sessionStorage 并把地址栏里的 token 抹掉，
+所以同一标签页内刷新无感；**关掉标签页再打开就要重新 `make url` 一次**。
+
+两个别走错方向的猜测：
+
+- **改成 `network_mode: host` 没用**。回环来源走的是另一条分支，同样校验 local token，一样要带。
+- **不要为了省事把端口绑到 `0.0.0.0`**。token 在 URL 里，等于凭据；现在绑 `127.0.0.1` 才是安全的。
 
 ## 三个必须记住的坑
 

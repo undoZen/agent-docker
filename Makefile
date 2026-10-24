@@ -18,7 +18,7 @@ AGENT_UID ?= $(shell id -u)
 AGENT_GID ?= $(shell id -g)
 
 .DEFAULT_GOAL := help
-.PHONY: help base mirasim all claude claude-shell up stop logs shell login attach status config down purge egress who check-uid
+.PHONY: help base mirasim all claude claude-shell up stop logs shell login attach status config down purge egress who check-uid url
 
 help:
 	@echo "构建"
@@ -35,6 +35,7 @@ help:
 	@echo "  make up / stop / logs / shell / config"
 	@echo ""
 	@echo "Mirasim"
+	@echo "  make url         打印带 token 的本地 Web UI 地址（网页 401 就是这个）"
 	@echo "  make login       交互登录，要 -it，会问邮箱和邮件验证码"
 	@echo "  make attach      打开「接入云端」"
 	@echo "  make status      看接入状态"
@@ -103,6 +104,20 @@ attach:
 
 status:
 	cd $(VARIANT) && docker compose exec mirasim mirasim ui-cli --port 4939 machines attach status
+
+# 打印带 token 的本地 Web UI 地址。
+# 为什么必须带：docker 的端口映射会把来源 IP 变成网桥网关（172.x.0.1），服务端把它
+# 当远程请求，一律要求 access token；不带就是满屏 "missing/bad access token"。
+# token 是持久的，存在容器的 ~/.mirasim/run/local-<端口>.token，随卷保留、重启不变。
+# 前端拿到 ?token= 后存进 sessionStorage 并把地址栏里的 token 抹掉，所以同一标签页
+# 内刷新不用重贴；关掉标签页再打开就得重新来一次。
+url:
+	@tok=$$(cd $(VARIANT) && docker compose exec -T mirasim cat /home/agent/.mirasim/run/local-4939.token 2>/dev/null | tr -d '\r\n'); \
+	if [ -z "$$tok" ]; then \
+	  echo "拿不到 token：容器没在跑，或 serve 还没起来（先 make up，等日志出现「开始 serve」）"; \
+	  exit 1; \
+	fi; \
+	printf 'http://127.0.0.1:%s/?token=%s\n' "$${MIRASIM_HOST_PORT:-4939}" "$$tok"
 
 down:
 	cd $(VARIANT) && docker compose down
