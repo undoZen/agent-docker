@@ -13,6 +13,27 @@ export PATH="/opt/agents/bin:$PATH"
 
 MIRASIM_BIN="/opt/mirasim/mirasim"
 
+# ── 固定 local access token ────────────────────────────────────────
+# serve 每次启动都把 token 重新随机生成一遍（randomBytes(32)）再写进
+# $MIRASIM_HOME/run/local-<port>.token。副作用：每次 make up 之后，
+# 浏览器里存着的旧地址就失效，变成 401 "missing/bad local token"。
+# 这里用一个存在卷里的固定值钉住它；想自己指定就设 MIRASIM_LOCAL_TOKEN。
+if [ -z "${MIRASIM_LOCAL_TOKEN:-}" ]; then
+  tok_file="$MIRASIM_HOME/local-token"
+  if [ -r "$tok_file" ] && [ -s "$tok_file" ]; then
+    MIRASIM_LOCAL_TOKEN="$(cat "$tok_file")"
+    export MIRASIM_LOCAL_TOKEN
+  elif mkdir -p "$MIRASIM_HOME" 2>/dev/null && [ -w "$MIRASIM_HOME" ]; then
+    head -c 32 /dev/urandom | base64 | tr -d '\n=' | tr '+/' '-_' > "$tok_file"
+    chmod 600 "$tok_file" 2>/dev/null || true
+    MIRASIM_LOCAL_TOKEN="$(cat "$tok_file")"
+    export MIRASIM_LOCAL_TOKEN
+  else
+    echo "⚠ $MIRASIM_HOME 不可写：token 没法固定，每次重启网页地址都会失效。" >&2
+    echo "  顺手查一下卷的属主是不是当前 uid：ls -ln $MIRASIM_HOME | head" >&2
+  fi
+fi
+
 # ── 前置转发器（可选）───────────────────────────────────────────────
 # 为什么需要：serve 的对端判定只看 TCP 源地址。经 docker 端口映射进来的请求，
 # 源地址是网桥网关（172.x.0.1），于是被当成远程 —— 回环限制的接口（/mirachannel/pair、

@@ -113,7 +113,7 @@ status:
 # 前端拿到 ?token= 后存进 sessionStorage 并把地址栏里的 token 抹掉，所以同一标签页
 # 内刷新不用重贴；关掉标签页再打开就得重新来一次。
 url:
-	@tok=$$(cd $(VARIANT) && docker compose exec -T mirasim cat /home/agent/.mirasim/run/local-4939.token 2>/dev/null | tr -d '\r\n'); \
+	@tok=$$(cd $(VARIANT) && docker compose exec -T mirasim sh -c 'printf %s "$${MIRASIM_LOCAL_TOKEN:-$$(cat /home/agent/.mirasim/run/local-4939.token 2>/dev/null)}"' 2>/dev/null | tr -d '\r\n'); \
 	if [ -z "$$tok" ]; then \
 	  echo "拿不到 token：容器没在跑，或 serve 还没起来（先 make up，等日志出现「开始 serve」）"; \
 	  exit 1; \
@@ -127,7 +127,7 @@ url:
 # 这里在容器内部发请求，源地址就是 127.0.0.1，所以能拿到；把返回里的连接码
 # 粘到客户端即可。
 pair:
-	@tok=$$(cd $(VARIANT) && docker compose exec -T mirasim cat /home/agent/.mirasim/run/local-4939.token 2>/dev/null | tr -d '\r\n'); \
+	@tok=$$(cd $(VARIANT) && docker compose exec -T mirasim sh -c 'printf %s "$${MIRASIM_LOCAL_TOKEN:-$$(cat /home/agent/.mirasim/run/local-4939.token 2>/dev/null)}"' 2>/dev/null | tr -d '\r\n'); \
 	if [ -z "$$tok" ]; then \
 	  echo "拿不到 token：容器没在跑，或 serve 还没起来（先 make up）"; \
 	  exit 1; \

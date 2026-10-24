@@ -54,6 +54,9 @@ services:
       MIRASIM_SERVER_HOST: "127.0.0.1"
       # 转发器的监听端口，是容器唯一的对外入口；下面的 ports 映射到它。
       MIRASIM_FORWARD_PORT: "4938"
+      # local token 默认每次启动随机生成，重启后网页地址就失效。entrypoint 会生成一次
+      # 并存在卷里（$MIRASIM_HOME/local-token）钉住它；想自己指定就往 .env 里写这个变量。
+      MIRASIM_LOCAL_TOKEN: ${MIRASIM_LOCAL_TOKEN:-}
       # headless 环境没有 keyring，登录态必然是明文，这是产品行为，不是配置失误
       MIRASIM_SECRET_STORE: "off"
 
