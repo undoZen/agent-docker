@@ -54,8 +54,13 @@ services:
       MIRASIM_SERVER_HOST: "127.0.0.1"
       # 转发器的监听端口，是容器唯一的对外入口；下面的 ports 映射到它。
       MIRASIM_FORWARD_PORT: "4938"
-      # local token 默认每次启动随机生成，重启后网页地址就失效。entrypoint 会生成一次
-      # 并存在卷里（$MIRASIM_HOME/local-token）钉住它；想自己指定就往 .env 里写这个变量。
+      # 必须固定住。serve 里 localToken = env.MIRASIM_LOCAL_TOKEN?.trim()
+      #   || randomBytes(32) —— 不设就每次启动换一把钥匙。
+      # 而前端把 token 存进 sessionStorage（mirasim.localToken），只给 /ws 拼
+      # ?token=，其余请求压根不带。于是服务一重启，开着的标签页立刻变成
+      # "missing/bad local token" + /api/* 401。
+      # 由 `make token` 生成到 variants/mirasim/.env，compose 自动读这个文件；
+      # 留空就等于放弃固定，每次重启网页地址都不一样。
       MIRASIM_LOCAL_TOKEN: ${MIRASIM_LOCAL_TOKEN:-}
       # headless 环境没有 keyring，登录态必然是明文，这是产品行为，不是配置失误
       MIRASIM_SECRET_STORE: "off"

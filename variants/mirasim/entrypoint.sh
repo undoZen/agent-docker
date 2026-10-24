@@ -25,11 +25,18 @@ fi
 
 MIRASIM_BIN="/opt/mirasim/mirasim"
 
-# ── 固定 local access token ────────────────────────────────────────
-# serve 每次启动都把 token 重新随机生成一遍（randomBytes(32)）再写进
-# $MIRASIM_HOME/run/local-<port>.token。副作用：每次 make up 之后，
-# 浏览器里存着的旧地址就失效，变成 401 "missing/bad local token"。
-# 这里用一个存在卷里的固定值钉住它；想自己指定就设 MIRASIM_LOCAL_TOKEN。
+# ── local access token ──────────────────────────────────────────────
+# 源码事实（v0.0.622）：
+#   BTs() => env.MIRASIM_LOCAL_TOKEN?.trim() || randomBytes(32).toString("base64url")
+# 不设这个环境变量，serve 每次启动就换一把新钥匙。而前端把 token 存进
+# sessionStorage（键 mirasim.localToken）、只给 /ws 拼 ?token=，
+# 所以服务一重启，开着的标签页里那把旧 key 立刻作废 ——
+# 症状正是 /ws refused "missing/bad local token" 加满屏 /api/* 401。
+#
+# 正常路径：由 compose 从 variants/mirasim/.env 注入（`make token` 生成），
+# 这里什么都不用做，值在容器重建后依然不变。
+# 下面这段只是兜底：有人直接 docker run 起来、没经过 .env 时，
+# 至少让同一个卷里的 token 别每次都变。
 if [ -z "${MIRASIM_LOCAL_TOKEN:-}" ]; then
   tok_file="$MIRASIM_HOME/local-token"
   if [ -r "$tok_file" ] && [ -s "$tok_file" ]; then
@@ -41,8 +48,9 @@ if [ -z "${MIRASIM_LOCAL_TOKEN:-}" ]; then
     MIRASIM_LOCAL_TOKEN="$(cat "$tok_file")"
     export MIRASIM_LOCAL_TOKEN
   else
-    echo "⚠ $MIRASIM_HOME 不可写：token 没法固定，每次重启网页地址都会失效。" >&2
-    echo "  顺手查一下卷的属主是不是当前 uid：ls -ln $MIRASIM_HOME | head" >&2
+    echo "⚠ 没设 MIRASIM_LOCAL_TOKEN，且 $MIRASIM_HOME 不可写：" >&2
+    echo "  只能退回随机 token，每次重启网页地址都会变（旧标签页会 401）。" >&2
+    echo "  修：在宿主机仓库目录执行 make token && make up" >&2
   fi
 fi
 

@@ -36,12 +36,16 @@ make base            # 首次构建，下载量约 2.5GB，慢
 make mirasim         # 在 base 上叠 Mirasim
 
 make config          # 校验 compose
+make token           # 生成固定的 local token → variants/mirasim/.env（make up 也会自动做）
 make up              # 起容器（还没登录，会停在等待状态）
 make login           # 另开一个终端，交互登录
 make attach          # 登录后：打开「接入云端」
 make status          # 看状态
-make url             # 打开本地网页（地址必须带 token，见「网页 401」一节）
+make url             # 打印带 token 的网页地址，开新标签页贴进去
 ```
+
+`make token` 不能省。serve 的 local token 默认每次启动随机生成，而前端把它缓存在
+sessionStorage 里；不固定的话每次重建容器，旧标签页就永久 401。机制见「网页 401 / 403」一节。
 
 `make login` 需要交互终端（要敲邮箱和邮件验证码）。登录完成后不用重启容器——
 entrypoint 每 5 秒轮询一次登录态，看到就自己开始 serve。
@@ -249,98 +253,179 @@ base      ARG AGENT_UID → useradd --uid     ← 固化进 /etc/passwd
 
 一句话原则：**构建者的 uid 必须等于使用者的 uid**，对不上就换卷名，或者干脆重建。
 
-## 网页 401：`missing/bad access token`
+## 网页 401 / 403：token 到底怎么传（有源码结论）
 
-**不是转发或权限问题，是服务端自己的回环判定。** 请求确实到了服务端（日志里 server 收到了、然后主动拒绝）。
+这一节是从 `v0.0.622` 的发布包里读出来的，不是猜的。发布包同时带二进制和前端产物：
+`web/app/assets/index-*.js` 是前端，`mirasim` 里内嵌了打包后的服务端 JS（明文可读）。
 
-`mirasim serve` 只信任两类请求：同一用户的 unix socket，以及带了 access token 的请求。
-Docker 的端口映射会把来源 IP 换成网桥网关（`172.x.0.1`），于是浏览器被当成远程访问，
-每个请求都要 `?token=`，不带就满屏 `missing/bad access token`。
+先把结论放前面：
 
-token 是持久的，存在容器的 `~/.mirasim/run/local-4939.token`（在 `mirasim-home` 卷里，重启不变）：
+> **服务端只认 `?token=` 和 `Authorization: Bearer`，不读 cookie；
+> 而前端只给 `/ws` 拼 token，其余请求一个都不带。**
+>
+> 所以：网页能不能用，取决于 `/ws` 那把 token 对不对；`/api/*` 的 401 是结构性的，
+> 改配置改不掉。
 
-```bash
-make url      # → http://127.0.0.1:4939/?token=xxxxxxxx
-```
+### 服务端怎么判定一个请求
 
-拿到的地址直接贴浏览器。服务端三种投递方式都认：`?token=`、`Authorization: Bearer …`、
-`x-mirasim-token` 头。前端读到 `?token=` 后会存进 sessionStorage 并把地址栏里的 token 抹掉，
-所以同一标签页内刷新无感；**关掉标签页再打开就要重新 `make url` 一次**。
+`DTs(req, peerTunnelNonce, sameUserTransport)` 返回四种来源之一：
 
-`/api/state`（普通 HTTP）和 `/ws`（WebSocket）用的是**同一个监听端口、同一套鉴权中间件**，
-两条 401 是同一个原因，不要分开排查。WS 客户端本来就是带 token 连的：
-`ws://127.0.0.1:<port>/ws?token=<token>`。
+| 来源 | 条件 | 后果 |
+|---|---|---|
+| `local` | 没有 `env.incoming`（非 HTTP 通道），或 `sameUserTransport` 为真 | **直接放行** |
+| `peer-tunnel` | 带了正确的 peer tunnel nonce 头 | 直接放行 |
+| `loopback` | 对端是 `127.x` / `::1`（`RD()` 判定） | 要求 **local token** |
+| `network` | 其他 | 要求 **access token** |
 
-两个别走错方向的猜测：
-
-- **不要改成 `network_mode: host`**。原因不只是「回环也要 token」，而是它**逐个地址监听**：
-  在容器里 `ss -ltnp` 能看到它绑了 `127.0.0.1`、`::1`，以及容器自己的 `172.20.0.2`——不是 `0.0.0.0`。
-  换成 host 网络后，这份清单里就会多出宿主机的 `192.168.x.x` 之类，等于把一个只靠 token
-  保护的界面摆到局域网上。
-- **不要为了省事把端口绑到 `0.0.0.0`**。token 在 URL 里，等于凭据；现在绑 `127.0.0.1` 才是安全的。
-
-判断「我有没有被别人摸到」的体检命令（容器里装了 iproute2）：
-
-```bash
-docker compose -f variants/mirasim/docker-compose.yml exec mirasim ss -ltnp
-# LISTEN 127.0.0.1:4939     ← 服务本体
-# LISTEN 172.20.0.2:4939    ← 容器自己的 eth0，宿主经端口映射就是从这进来的
-# LISTEN [::1]:4939
-# LISTEN 127.0.0.11:43041   ← docker 内嵌 DNS，跟这事无关
-```
-
-### 例外：`/mirachannel/pair` 会 403，而且带 token 也解不开
-
-网页上那个「把设备加到这台机器」的按钮会调 `/mirachannel/pair`，返回：
-
-```json
-{"ok":false,"error":"pairing is only available from this machine"}
-```
-
-这不是缺 token，是**先判来源再判 token**：
+关键一行：
 
 ```js
-if (!isLoopback(peer.address)) return false;   // ← 不是回环就直接拒
-return equal(token, localToken);
+let f8 = !!c4.socketPath;          // 这就是 sameUserTransport
+R = f8 ? null : BTs();             // localToken 只在 TCP 模式下存在
 ```
 
-上游的文档串写明理由：这些接口（`pair`、`remote`、`getDevices`、`mintEnrollment`）决定
-「谁可以连上这台机器」，不能让远程对端读到名单、更不能让远程对端给自己发一张加入许可。
-所以经 docker 端口映射进来的请求（源 IP 是网桥网关）永远过不去，也没有环境变量可以放宽
-——除非在容器内部做转发，让对端变回回环（见本节末尾）。
+也就是说 `sameUserTransport` 等价于「监听的是 unix domain socket」。而 `mirasim serve`
+的 CLI 只解析 `--port/-p`、`--host`、`--workdir`、`--no-open`、`--no-im` —— **没有 `--socket`**：
 
-要配对就在容器内部发请求，源地址就是 127.0.0.1：
+```js
+function ROu(b3){ /* …只认上面五个… */ return {kind:"serve", port:c4, bindHost:d5, workdir:f8, open:g5, im:h5} }
+```
+
+结论：**从 CLI 起的 serve 永远是 TCP 模式，永远走 token 校验**，没有「本机就免检」这个捷径。
+`local` 那条分支只对桌面 App 内部调用有意义。
+
+### token 本身
+
+```js
+function BTs(){ return Ns("LOCAL_TOKEN")?.trim() || randomBytes(32).toString("base64url") }
+// Ns(x) === process.env["MIRASIM_" + x]
+```
+
+**不设 `MIRASIM_LOCAL_TOKEN` 就每次启动重新随机一把。** 这是本仓库所有 401 的总根源。
+所以 `docker-compose.yml` 里有这个变量，值由 `make token` 生成到 `variants/mirasim/.env`
+（compose 自动读，已 gitignore），`make up` 会先确保它存在。
+
+三个投递位置服务端都认，但**没有一个走 cookie**：
+
+```js
+req.query("token") ?? req.header("x-mirasim-token")       // pair 等 TRUSTED 接口
+req.query("token") / Authorization: Bearer <t>            // /api/* 中间件
+```
+
+### 前端做了什么
+
+打开 `http://127.0.0.1:4939/?token=xxx` 时：
+
+```js
+const gee = "mirasim.localToken";
+function MJt(){
+  const t = new URL(location.href).searchParams.get("token");
+  return t ? (sessionStorage.setItem(gee,t),
+              /* 把地址栏里的 ?token= 删掉 */ history.replaceState(null,"",…), t)
+           : sessionStorage.getItem(gee);
+}
+```
+
+- 存进 **sessionStorage**（不是 localStorage，所以每个标签页各一份）
+- 地址栏里的 token 被 `replaceState` **抹掉**
+- WebSocket 地址是 `${ws|wss}://${host}/ws${token ? "?token="+… : ""}` —— **只有它会带**
+
+普通请求走的是：
+
+```js
+function fV(e,t){ if(t?.mode!=="direct"||!t.host) return e; … }
+//  本地模式 → 原样返回 "/api/state"，一个 token 都不加
+```
+
+`fetch(fV("/api/state", t))`、`fetch("/mirachannel/pair")` 都是这一路。
+**你在 DevTools 里找不到 token 是正常的 —— 代码里就没有。**
+
+页面主体数据走 WebSocket，所以：
+
+- `/ws` 连上 → 网页正常用
+- `/api/state` 401 → 顶栏版本号取不到，附带弹一个连接提示，不影响干活
+- `/mirachannel/pair` 403 → 见下面，结构性的
+
+### 所以正确的用法是
 
 ```bash
-make pair     # 打印 {"ok":true,"code":"…","hint":"paste the connection code into a client"}
+make token          # 首次；生成固定的 local token 到 variants/mirasim/.env
+make up             # 会自动补上这一步
+make url            # → http://127.0.0.1:4939/?token=xxxx
 ```
 
-把返回里的 `code` 粘到客户端即可。
+拿到地址**开一个新标签页**贴进去。注意 sessionStorage 是 per-tab 且不会自己清：
 
-不过默认配置下**网页上的那个按钮其实是可用的**——见下一节，转发器把对端换成了回环。
-`make pair` 留作不依赖网页的取码方式（脚本里、SSH 里都方便）。
+- 同一个标签页刷新 → 用里面的缓存，没问题
+- **换了 token / 重建过容器之后，旧标签页刷多少次都是 401**，必须关掉重开
+- 直接翻浏览器历史里那个地址也不行 —— token 早被 `replaceState` 删了
 
-### 容器里为什么多了一个 socat 转发器
+### `/mirachannel/pair` 的 403 是结构性的
 
-`ss` 能看到 `serve` 除了回环，还绑了容器自己的 eth0（`172.x.0.2`）。那是**另一个**监听器：
-「局域网直连」通道，只在**没有显式指定绑定地址**时才启动。所以 compose 给了
-`MIRASIM_SERVER_HOST=127.0.0.1`，它整个不再启动，容器里只剩回环。
+```js
+ax = req => {
+  let addr = QTn(req)?.remote?.address;
+  if (!RD(addr)) return false;                          // ① 对端必须是回环
+  let expect = localToken();
+  let got = req.query("token") ?? req.header("x-mirasim-token");
+  return rUe(got, expect);                              // ② 任一为空 → false
+}
+```
 
-拓扑因此变成：
+`rUe` 第一行就是 `if(!a2||!b3) return false`。前端那行是裸的 `fetch("/mirachannel/pair")`，
+**query 和 header 都不带** → `got` 恒为 `undefined` → 恒 false。
+
+所以网页上那个「把设备加到这台机器」的按钮，在浏览器里**从来就不可能成功** ——
+不是网络、不是转发、不是 token 没设对。它大概是给桌面壳用的（那里能注入 header）。
+
+要配对就用容器内发请求，源地址天然是 127.0.0.1，token 我们补上：
+
+```bash
+make pair     # → {"ok":true, "code":"…", "hint":"paste the connection code into a client"}
+```
+
+把 `code` 粘到客户端。
+
+### 容器里那个 socat 转发器是干什么的
+
+serve 直接用 `--port` 监听时，**没有** `--host` 的话还会额外起一个「局域网直连」监听器，
+绑到容器自己的 eth0（`172.x.0.2`）上。compose 给了 `MIRASIM_SERVER_HOST=127.0.0.1`，
+那个监听器整个不启动，容器里只剩回环。
+
+拓扑：
 
 ```
 宿主机 127.0.0.1:4939 ──► 容器 :4938 (socat) ──► 127.0.0.1:4939 (serve)
                                                   对端恒为 127.0.0.1
 ```
 
-好处：所有请求都被当成「本机」，`/mirachannel/pair`、`/remote` 这些回环限制的接口
-在网页上也能用了，不用退回去 `make pair`。
+**为什么必须转这一道**：docker 的端口映射会重写对端地址，serve 看到的是网桥网关
+（`172.x.0.1`）→ `RD()` 为 false → 判成 `network` → 要 **access token**。
+那时你拿 local token 去访问，报的是 `missing/bad access token`，方向就全错了。
+转一道之后对端恒为 `127.0.0.1`，服务端才按 `loopback` 处理，你要的那把 local token 才是对的。
 
-代价说得直白点：**任何能连到这个 docker 网络的人，请求都会被当作本机请求**。
-token 仍然要校验，但「来自本机」这层信任没有了。所以别把不受信的容器放进 `mirasim-net`。
+代价：**任何能连到这个 docker 网络的人，请求都被当成「本机」**。token 仍然校验，
+但「来自本机」这层信任没有了，所以别把不受信的容器塞进 `mirasim-net`。
 
-不想要转发器：删掉 compose 里的 `MIRASIM_FORWARD_PORT`，把 ports 改回 `…:4939` 即可。
-此时网页能看、配对接口 403，用 `make pair` 取码。
+不想要转发器：删掉 `MIRASIM_FORWARD_PORT`，`ports` 改回 `…:4939`，
+然后 `?token=` 要换成 access token（从 `make pair` 的返回里拿），而不是 local token。
+
+两个别走错方向的做法：
+
+- **别改成 `network_mode: host`**。serve 是逐个地址监听的（`127.0.0.1`、`::1`、容器 eth0），
+  换 host 网络会让清单里多出宿主机 `192.168.x.x`，等于把一个靠 token 保护的界面摆到局域网上。
+- **别把端口绑到 `0.0.0.0`**。token 在 URL 里，URL 会进历史记录、会被截图，它就是凭据。
+
+体检命令（容器里有 iproute2）：
+
+```bash
+docker compose -f variants/mirasim/docker-compose.yml exec mirasim ss -ltnp
+# LISTEN 0.0.0.0:4938        ← socat 转发器（容器唯一的对外入口）
+# LISTEN 127.0.0.1:4939      ← serve 本体
+# LISTEN 127.0.0.11:xxxxx    ← docker 内嵌 DNS，无关
+```
+
+看到 `172.x.x.x:4939` 就说明 `MIRASIM_SERVER_HOST` 没生效，回去检查 compose。
 
 ## 五个必须记住的坑
 

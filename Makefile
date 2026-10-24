@@ -5,6 +5,10 @@ VARIANT := variants/mirasim
 # 如果 .env 里改过名，这里也要跟着改，否则 fixperm 会去 chown 一个空卷。
 MIRASIM_HOME_VOLUME ?= mirasim-home
 MIRASIM_WORK_VOLUME ?= mirasim-work
+# compose 会自动读同目录的 .env。local token 就钉在这里。
+# 必须是文件而不是 shell 环境变量：`docker compose exec` 继承的是容器创建时的
+# 配置（即 .env），拿不到 entrypoint 里 export 的东西 —— 见 url / token 目标。
+MIRASIM_ENV := $(VARIANT)/.env
 
 # base 的构建参数，命令行可覆盖，例如： make base WITH_RUST=0
 AGENT_CLIS ?= @anthropic-ai/claude-code
@@ -22,7 +26,7 @@ AGENT_UID ?= $(shell id -u)
 AGENT_GID ?= $(shell id -g)
 
 .DEFAULT_GOAL := help
-.PHONY: help base mirasim all claude claude-shell up stop logs shell login attach status config down purge egress who check-uid url pair fixperm
+.PHONY: help base mirasim all claude claude-shell up stop logs shell login attach status config down purge egress who check-uid url pair fixperm token
 
 help:
 	@echo "构建"
@@ -40,6 +44,7 @@ help:
 	@echo ""
 	@echo "Mirasim"
 	@echo "  make url         打印带 token 的本地 Web UI 地址（网页 401 就是这个）"
+	@echo "  make token       生成/复用固定的 local token（首次 up 自动做）"
 	@echo "  make pair        取连接码，把桌面 App / 手机加到这台机器（网页上那个按钮会 403）"
 	@echo "  make login       交互登录，要 -it，会问邮箱和邮件验证码"
 	@echo "  make attach      打开「接入云端」"
@@ -87,7 +92,33 @@ claude: check-uid
 claude-shell: check-uid
 	docker compose -f compose.agent.yml run --rm claude bash
 
-up:
+# ── local token：整个鉴权模型里唯一的那把钥匙 ──────────────────────
+# 源码事实（v0.0.622，二进制里读出来的）：
+#   BTs() = env.MIRASIM_LOCAL_TOKEN?.trim() || randomBytes(32)
+# 也就是说：不设这个变量，serve 每次启动都重新随机一把。
+# 而前端把 token 存进 sessionStorage（键 mirasim.localToken），
+# 一旦 serve 重启换了值，标签页里缓存的旧 token 就全部失效 ——
+# 表现就是 /ws refused "missing/bad local token" + /api/* 401，
+# 而且刷同一个标签页也不会好（sessionStorage 是 per-tab 且不清）。
+#
+# 所以把它钉在 variants/mirasim/.env 里：compose 自动读，容器重建也不变。
+# 比写进卷里更可靠：卷可能因属主问题不可写（那时 entrypoint 只会 warn 然后
+# 静默退化成随机 token），而 .env 不依赖容器内任何写权限。
+token:
+	@f="$(MIRASIM_ENV)"; \
+	if [ -f "$$f" ] && grep -q '^MIRASIM_LOCAL_TOKEN=.' "$$f"; then \
+	  echo "→ 复用 $(MIRASIM_ENV) 里已有的 local token" >&2; \
+	else \
+	  tok=$$(head -c 32 /dev/urandom | base64 | tr -d '\n=' | tr '+/' '-_'); \
+	  touch "$$f"; chmod 600 "$$f"; \
+	  { grep -v '^MIRASIM_LOCAL_TOKEN=' "$$f" || true; } > "$$f.tmp"; \
+	  printf 'MIRASIM_LOCAL_TOKEN=%s\n' "$$tok" >> "$$f.tmp"; \
+	  mv "$$f.tmp" "$$f"; \
+	  chmod 600 "$$f"; \
+	  echo "→ 生成 local token 并写入 $(MIRASIM_ENV)（已 gitignore）" >&2; \
+	fi
+
+up: token
 	cd $(VARIANT) && docker compose up -d
 
 config:
@@ -112,31 +143,39 @@ status:
 	cd $(VARIANT) && docker compose exec mirasim mirasim ui-cli --port 4939 machines attach status
 
 # 打印带 token 的本地 Web UI 地址。
-# 为什么必须带：docker 的端口映射会把来源 IP 变成网桥网关（172.x.0.1），服务端把它
-# 当远程请求，一律要求 access token；不带就是满屏 "missing/bad access token"。
-# token 是持久的，存在容器的 ~/.mirasim/run/local-<端口>.token，随卷保留、重启不变。
-# 前端拿到 ?token= 后存进 sessionStorage 并把地址栏里的 token 抹掉，所以同一标签页
-# 内刷新不用重贴；关掉标签页再打开就得重新来一次。
-url:
-	@tok=$$(cd $(VARIANT) && docker compose exec -T mirasim sh -c 'printf %s "$${MIRASIM_LOCAL_TOKEN:-$$(cat /home/agent/.mirasim/run/local-4939.token 2>/dev/null)}"' 2>/dev/null | tr -d '\r\n'); \
-	if [ -z "$$tok" ]; then \
-	  echo "拿不到 token：容器没在跑，或 serve 还没起来（先 make up，等日志出现「开始 serve」）"; \
-	  exit 1; \
-	fi; \
-	printf 'http://127.0.0.1:%s/?token=%s\n' "$${MIRASIM_HOST_PORT:-4939}" "$$tok"
+#
+# 为什么必须带 token（源码结论，别凭直觉改）：
+#   前端 fV("/api/state", endpoint) 在「本机模式」下把路径原样返回 —— 浏览器发起的
+#   /api/* 请求一个 token 都不带。服务端 MTs 中间件只认 ?token= 和
+#   Authorization: Bearer，于是 loopback 分支一律 401。这不是配置问题，是前端
+#   没有把 token 附到那些请求上，代码里就没有这段逻辑。
+#   真正承载数据的是 WebSocket：前端自己会拼 /ws?token=<sessionStorage 里那个>。
+#   所以只要地址里的 token 和 serve 的 localToken 一致，网页就能正常用。
+#
+# token 从 .env 读，和 serve 用的是同一个值（见 token 目标）。不再去问容器，
+# 因为 docker compose exec 得到的环境是容器创建时的快照，未必反映当前进程。
+url: token
+	@tok=$$(sed -n 's/^MIRASIM_LOCAL_TOKEN=//p' "$(MIRASIM_ENV)" | tr -d '\r\n'); \
+	hp=$$(sed -n 's/^MIRASIM_HOST_PORT=//p' "$(MIRASIM_ENV)" | tr -d '\r\n'); \
+	if [ -z "$$tok" ]; then echo "拿不到 token：$(MIRASIM_ENV) 里没有 MIRASIM_LOCAL_TOKEN"; exit 1; fi; \
+	printf 'http://127.0.0.1:%s/?token=%s\n' "$${hp:-4939}" "$$tok"
 
 # 取「连接码」，用于把一台客户端（桌面 App / 手机）加到这台机器上。
-# /mirachannel/pair 和 /mirachannel/remote 都是 TRUSTED-ONLY：先判来源是不是回环，
-# 再比 token —— 不是回环直接 403 "pairing is only available from this machine"，
-# 带什么 token 都没用。而经 docker 端口映射进来的请求源 IP 是网桥网关，永远过不了。
-# 这里在容器内部发请求，源地址就是 127.0.0.1，所以能拿到；把返回里的连接码
-# 粘到客户端即可。
-pair:
-	@tok=$$(cd $(VARIANT) && docker compose exec -T mirasim sh -c 'printf %s "$${MIRASIM_LOCAL_TOKEN:-$$(cat /home/agent/.mirasim/run/local-4939.token 2>/dev/null)}"' 2>/dev/null | tr -d '\r\n'); \
-	if [ -z "$$tok" ]; then \
-	  echo "拿不到 token：容器没在跑，或 serve 还没起来（先 make up）"; \
-	  exit 1; \
-	fi; \
+#
+# 为什么网页上那个按钮必然失败（源码 ax()，不是网络问题）：
+#   ax = req => {
+#     let addr = QTn(req)?.remote?.address;          // 必须是对端是回环
+#     if (!RD(addr)) return false;                   // 127.x / ::1 判定
+#     let expect = localToken();
+#     let got = req.query("token") ?? req.header("x-mirasim-token");
+#     return rUe(got, expect);                       // 任一为空直接 false
+#   }
+# 前端那行是裸的 `fetch("/mirachannel/pair")` —— query 和 header 都不带，
+# 所以 got 恒为 undefined，rUe 恒为 false，403 是结构性的。
+# 这里在容器内部发请求：源地址是 127.0.0.1（满足前半段），token 由我们补上。
+pair: token
+	@tok=$$(sed -n 's/^MIRASIM_LOCAL_TOKEN=//p' "$(MIRASIM_ENV)" | tr -d '\r\n'); \
+	if [ -z "$$tok" ]; then echo "拿不到 token：$(MIRASIM_ENV) 里没有"; exit 1; fi; \
 	cd $(VARIANT) && docker compose exec -T mirasim \
 	  curl -sS "http://127.0.0.1:4939/mirachannel/pair?token=$$tok"; \
 	echo
