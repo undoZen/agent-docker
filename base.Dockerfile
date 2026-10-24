@@ -6,7 +6,12 @@
 #
 #   docker build -f base.Dockerfile -t agent-docker:1 .
 #   docker run --rm -it agent-docker:1            # 直接进去当普通 Linux 用
-FROM --platform=linux/amd64 debian:trixie-slim
+
+# 默认锁 amd64：目前各变体要用到的二进制（含 agent CLI）都是 x86_64 发布。
+# 写成 ARG 而不是字面量：BuildKit 的 FromPlatformFlagConstDisallowed 检查不允许
+# FROM --platform 用常量（那样在别的架构上会静默失败），变量形式既保留意图又可覆盖。
+ARG BASE_PLATFORM=linux/amd64
+FROM --platform=${BASE_PLATFORM} debian:trixie-slim
 
 ARG AGENT_CLIS="@anthropic-ai/claude-code"
 ARG EXTRA_APT=""
@@ -16,6 +21,13 @@ ARG WITH_GO=1
 ARG WITH_RUST=1
 # latest = 从 go.dev 的 JSON feed 取当前 stable；也可写死 1.27.3
 ARG GO_VERSION=latest
+# 容器内用户的 uid/gid —— 这是「身份」的**唯一来源**。
+# 默认取构建机上执行 make 的那个人的 uid/gid，这样 bind mount 进来的宿主机目录
+# 天然可写、产物属主也是你；换机器重建会自动跟着变。
+# 它经由下面的 useradd 固化进 /etc/passwd，再由结尾的 USER 写进镜像配置。
+# 运行时（compose / docker run）不需要、也不应该再指定一次 uid。
+ARG AGENT_UID=1000
+ARG AGENT_GID=1000
 ARG DEBIAN_FRONTEND=noninteractive
 
 # PATH 写死而不用 ${PATH} 拼，避免上游镜像改基础 PATH 时这里悄悄变化。
@@ -30,7 +42,7 @@ ENV HOME=/home/agent \
     NPM_CONFIG_UPDATE_NOTIFIER=false \
     PATH="/opt/agents/bin:/usr/local/go/bin:/opt/rust/cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
-# 预装工具链。容器内是 uid 10001，apt install 用不了，所以「能自由干活」全靠这一层。
+# 预装工具链。容器内是非 root 用户，apt install 用不了，所以「能自由干活」全靠这一层。
 # 要再加东西优先用 EXTRA_APT，不用改下面的列表。
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
@@ -58,12 +70,32 @@ RUN apt-get update \
  && rm -f /usr/lib/python3*/EXTERNALLY-MANAGED \
  && rm -rf /var/lib/apt/lists/*
 
-# 固定非 root uid。10001 不和宿主机任何真实用户对应，也不在 1000-9999 的常见区间里。
-RUN groupadd --gid 10001 agent \
- && useradd --uid 10001 --gid 10001 --create-home --home-dir /home/agent \
-           --shell /bin/bash agent \
- && mkdir -p /home/agent/work \
- && chown -R 10001:10001 /home/agent
+# 建容器用户：**名字固定是 agent，号跟着构建者走**，两者解耦。
+#   名字固定  → 容器里 `whoami` 永远是 agent，变体和 compose 都按名字引用；
+#   号是变量  → bind mount 进来的宿主机目录天然可写，产物属主也是你。
+# 换个人 clone 下来 `make base`，号自动就是他的（Makefile 里 id -u / id -g），不用改任何文件。
+#
+# 两个必须处理的现实情况（否则换个 uid 就构建失败）：
+#   1. gid 已被基础镜像占用 —— Debian 的 100 就是 users 组，1000 以下也常有系统组。
+#      此时直接复用那个组，硬 groupadd 会报 "GID already exists"。
+#      id 输出里主组名会显示成 users 之类，但 gid 号是对的，对齐效果不受影响。
+#   2. uid 已被占用（base 镜像里的系统账号）—— 无法复用（那会改变别人家账号的语义），
+#      直接失败并提示换一个号，比让后续层诡异出错强。
+RUN set -eu; \
+    if getent group "${AGENT_GID}" >/dev/null; then \
+      echo "==> gid ${AGENT_GID} 已存在，复用基础镜像里的组：$(getent group "${AGENT_GID}" | cut -d: -f1)"; \
+    else \
+      groupadd --gid "${AGENT_GID}" agent; \
+    fi; \
+    if getent passwd "${AGENT_UID}" >/dev/null; then \
+      echo "uid ${AGENT_UID} 已被基础镜像里的 $(getent passwd "${AGENT_UID}" | cut -d: -f1) 占用" >&2; \
+      echo "换一个空闲 uid 重建，例如：make base AGENT_UID=1500 AGENT_GID=${AGENT_GID}" >&2; \
+      exit 1; \
+    fi; \
+    useradd --uid "${AGENT_UID}" --gid "${AGENT_GID}" --create-home \
+            --home-dir /home/agent --shell /bin/bash agent; \
+    mkdir -p /home/agent/work; \
+    chown -R "${AGENT_UID}:${AGENT_GID}" /home/agent
 
 # agent CLI 装在 /opt/agents（家目录之外）。
 # 放进家目录的话，一旦该目录被挂成卷，卷初始化之后就不会再随镜像更新。
@@ -75,7 +107,7 @@ RUN mkdir -p /opt/agents \
     else \
       echo "==> 未指定 AGENT_CLIS：镜像里不会有任何 agent CLI" >&2; \
     fi \
- && chown -R 10001:10001 /opt/agents
+ && chown -R ${AGENT_UID}:${AGENT_GID} /opt/agents
 
 # ── Go：官方静态 tarball，版本与 sha256 都从 go.dev 的 JSON feed 取 ──
 RUN if [ "$WITH_GO" = "1" ]; then \
@@ -109,7 +141,7 @@ RUN if [ "$WITH_RUST" = "1" ]; then \
       chmod +x /tmp/rustup-init; \
       /tmp/rustup-init -y --no-modify-path --profile minimal --default-toolchain stable; \
       rm -f /tmp/rustup-init; \
-      chown -R 10001:10001 /opt/rust; \
+      chown -R ${AGENT_UID}:${AGENT_GID} /opt/rust; \
       /opt/rust/cargo/bin/cargo --version; \
     fi
 
@@ -128,10 +160,12 @@ RUN printf '%s\n' \
       '# agent-docker: login shell 里补回工具链路径（/etc/profile 会重置 PATH）' \
       '. /etc/profile.d/10-agent-paths.sh' \
       >> /home/agent/.profile \
- && chown 10001:10001 /home/agent/.profile
+ && chown ${AGENT_UID}:${AGENT_GID} /home/agent/.profile
 
 # 故意不设 ENTRYPOINT：docker run -it 进来就是 bash，当普通 Linux 用。
 # 各变体自己定义 ENTRYPOINT 覆盖这个 CMD。
-USER 10001:10001
+# 这一行是「身份」落地的唯一位置：以后所有层、所有变体、所有 compose
+# 都只是继承它，不再重复写 uid/gid。
+USER ${AGENT_UID}:${AGENT_GID}
 WORKDIR /home/agent/work
 CMD ["bash"]

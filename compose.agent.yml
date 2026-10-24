@@ -5,15 +5,19 @@
 #
 # 想让它在你自己的项目目录里干活：
 #   WORKSPACE=~/code/myproj make claude
-# 注意宿主机目录的属主必须让容器里的 uid 10001 能写，否则只能读不能改：
-#   sudo chown -R 10001:10001 ~/code/myproj
+#
+# 容器内 uid 默认取你构建镜像时的 uid（make base 会自动传 id -u / id -g），
+# 所以宿主机目录天然可写，不需要 chown。
+# 只有镜像是在另一台机器上构建的、uid 对不上时，才需要：
+#   sudo chown -R $(id -u):$(id -g) ~/code/myproj
 
 name: agent
 
 # 和 variants/mirasim 里那套硬化保持一致：非 root、丢全部 capability、无宿主挂载（除工作区）
 x-hardening: &hardening
   platform: linux/amd64
-  user: "10001:10001"
+  # 不写 user:。容器身份由镜像的 USER 决定（`make base` 时按 id -u 烘焙进去），
+  # 在这里再写一遍就是第二个真相，镜像一换就会错位。
   init: true
   cap_drop:
     - ALL
@@ -55,7 +59,9 @@ services:
     command: ["claude"]
 
 volumes:
+  # 卷名可用环境变量改（写在 .env 里就行）：同一台 docker daemon 上有多个人用时，
+  # 各自换一个名字，彼此的家目录和登录态就不会互相踩，`make purge` 也只删自己的。
   agent-home:
-    name: agent-home
+    name: ${AGENT_HOME_VOLUME:-agent-home}
   agent-work:
-    name: agent-work
+    name: ${AGENT_WORK_VOLUME:-agent-work}

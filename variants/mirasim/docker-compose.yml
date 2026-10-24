@@ -16,8 +16,10 @@ services:
     restart: unless-stopped
     stop_grace_period: 30s
 
-    # ── 身份：固定非 root uid，和宿主机任何真实用户都不对应 ──
-    user: "10001:10001"
+    # ── 身份 ──
+    # 不写 user:。uid/gid 在 `make base` 时由 AGENT_UID/AGENT_GID 决定并烘焙进镜像，
+    # 变体用 `USER agent` 按名字继承，这里再写一遍只会制造对不齐的第二个真相。
+    # 想确认实际身份：docker compose exec mirasim id
 
     # ── 文件系统：容器内可写（朋友能自由装东西），可写层随容器重建清空 ──
     #   真正挡住宿主机文件的是「没有任何 bind mount」+ cap_drop + 非 root uid，
@@ -74,7 +76,9 @@ networks:
     name: mirasim-net
 
 volumes:
+  # 卷名可用环境变量覆盖（写在 .env 里）：同一台 docker daemon 有多人用时各自换名，
+  # 免得 `docker compose down -v` 把别人的登录态一起清掉。
   mirasim-home:
-    name: mirasim-home
+    name: ${MIRASIM_HOME_VOLUME:-mirasim-home}
   agent-work:
-    name: mirasim-work
+    name: ${MIRASIM_WORK_VOLUME:-mirasim-work}

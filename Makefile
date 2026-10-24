@@ -10,9 +10,15 @@ WITH_GO ?= 1
 WITH_RUST ?= 1
 GO_VERSION ?= latest
 MIRASIM_VERSION ?= stable
+# 容器内 uid/gid 默认跟随构建机上执行 make 的人，解决 bind mount 权限问题。
+# 这是身份的唯一来源：值被固化进镜像，运行时（compose / docker run）自动继承，
+# 不需要在两处写同一个数字。要固定或给别的机器复现：
+#    make base AGENT_UID=1000 AGENT_GID=1000
+AGENT_UID ?= $(shell id -u)
+AGENT_GID ?= $(shell id -g)
 
 .DEFAULT_GOAL := help
-.PHONY: help base mirasim all claude claude-shell up stop logs shell login attach status config down purge egress
+.PHONY: help base mirasim all claude claude-shell up stop logs shell login attach status config down purge egress who check-uid
 
 help:
 	@echo "构建"
@@ -34,12 +40,14 @@ help:
 	@echo "  make status      看接入状态"
 	@echo ""
 	@echo "维护"
+	@echo "  make who         看镜像内 uid 和宿主 uid 是否对齐（权限问题先看这个）"
 	@echo "  make down        删容器、保卷（登录态还在）"
 	@echo "  make purge       连卷一起删（登录态会丢）"
 	@echo "  make egress      挡容器访问内网和云元数据地址"
 
 base:
-	docker build -f base.Dockerfile -t $(BASE_TAG) --build-arg AGENT_CLIS="$(AGENT_CLIS)" --build-arg EXTRA_APT="$(EXTRA_APT)" --build-arg WITH_BROWSER=$(WITH_BROWSER) --build-arg WITH_GO=$(WITH_GO) --build-arg WITH_RUST=$(WITH_RUST) --build-arg GO_VERSION=$(GO_VERSION) .
+	@echo "→ 容器内用户 uid=$(AGENT_UID) gid=$(AGENT_GID)（宿主是 $$(id -u):$$(id -g)）"
+	docker build -f base.Dockerfile -t $(BASE_TAG) --build-arg AGENT_CLIS="$(AGENT_CLIS)" --build-arg EXTRA_APT="$(EXTRA_APT)" --build-arg WITH_BROWSER=$(WITH_BROWSER) --build-arg WITH_GO=$(WITH_GO) --build-arg WITH_RUST=$(WITH_RUST) --build-arg GO_VERSION=$(GO_VERSION) --build-arg AGENT_UID=$(AGENT_UID) --build-arg AGENT_GID=$(AGENT_GID) .
 
 mirasim: base
 	docker build -f $(VARIANT)/Dockerfile --build-arg BASE_IMAGE=$(BASE_TAG) --build-arg MIRASIM_VERSION=$(MIRASIM_VERSION) -t $(MIRASIM_TAG) $(VARIANT)
@@ -47,12 +55,29 @@ mirasim: base
 all: mirasim
 	@echo "完成：$(BASE_TAG) + $(MIRASIM_TAG)"
 
+# 镜像里的 uid 是构建时烘焙进去的：拿别人构建的镜像、又要挂自己的目录，就会撞权限。
+# 这里在运行前比对一次，省得在一堆 EACCES 里猜原因。
+# 只看 BASE_TAG：base 的 Config.User 一定是数字（USER uid:gid 收尾），
+# 而变体是 `USER agent`，Config.User 是字符串，得另外解析 —— 见 README。
+#
+# 写法注意（踩过一次）：macOS 自带的 GNU Make 3.81 在 `$$var` 后面紧跟中文时会算错
+# 字节数、吞掉几个字符（`uid=1000，` 变成 `uid=，`）。必须写 `$${var}`。
+# 构建机上的 4.x 没这毛病，但别指望它一定是 4.x。
+check-uid:
+	@img=$$(docker image inspect $(BASE_TAG) --format '{{.Config.User}}' 2>/dev/null | cut -d: -f1); \
+	if [ -n "$$img" ] && [ "$$img" != "$$(id -u)" ]; then \
+	  echo "⚠ $(BASE_TAG) 里的 uid=$${img}，而你当前是 uid=$$(id -u)"; \
+	  echo "  → WORKSPACE 挂进来的目录在容器里会写不了（容器内身份是别的人）"; \
+	  echo "  → 用你自己的 uid 重建：make base"; \
+	fi
+
 # 用 base 直接跑 claude code。这里的 --rm 只删掉这次会话结束后退出的临时容器，
 # 登录态和配置都在 agent-home 卷里，删容器不影响。别跟服务容器的 restart 策略混为一谈。
-claude:
+# 不再往这里传 AGENT_UID/GID：身份在镜像里，传了也不会被消费（buildx 还会报警告）。
+claude: check-uid
 	docker compose -f compose.agent.yml run --rm claude
 
-claude-shell:
+claude-shell: check-uid
 	docker compose -f compose.agent.yml run --rm claude bash
 
 up:
@@ -87,3 +112,16 @@ purge:
 
 egress:
 	sudo bash $(VARIANT)/egress-lockdown.sh
+
+# 排查文件权限问题的第一步：镜像里的 uid 和宿主 uid 是不是同一个。
+# 不一致的典型症状：bind mount 进来的目录在容器里写不了；或者容器产出的文件
+# 在你这边显示成别人的、删不掉。
+# 顺带也能确认 tag 下的镜像到底是不是本仓库构建的（构建时间 + Config.User）。
+who:
+	@printf '宿主     uid=%s gid=%s\n' "$$(id -u)" "$$(id -g)"
+	@docker image inspect $(BASE_TAG) --format 'base     构建于 {{.Created}}  User={{.Config.User}}' 2>/dev/null \
+	  || echo 'base     镜像不存在 —— 还没 make base，或 tag 被改过'
+	@docker run --rm --network none $(BASE_TAG) id 2>/dev/null | sed 's/^/base     /' || true
+	@docker image inspect $(MIRASIM_TAG) --format 'mirasim  构建于 {{.Created}}  User={{.Config.User}}' 2>/dev/null \
+	  || echo 'mirasim  镜像不存在 —— 还没 make mirasim'
+	@docker run --rm --network none --entrypoint id $(MIRASIM_TAG) 2>/dev/null | sed 's/^/mirasim  /' || true
