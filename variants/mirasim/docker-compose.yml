@@ -1,0 +1,80 @@
+name: mirasim
+
+services:
+  mirasim:
+    build:
+      context: .
+      args:
+        # 由 Makefile 传入；直接 docker compose build 的话需要 agent-docker:1 已存在
+        BASE_IMAGE: ${BASE_IMAGE:-agent-docker:1}
+        MIRASIM_VERSION: ${MIRASIM_VERSION:-stable}
+    image: ${MIRASIM_TAG:-agent-docker-mirasim:1}
+    platform: linux/amd64
+    container_name: mirasim
+    init: true
+    # 开机/重启 docker 自动拉起；手动 stop 或 down 之后保持停止，直到下次 up/start。
+    restart: unless-stopped
+    stop_grace_period: 30s
+
+    # ── 身份：固定非 root uid，和宿主机任何真实用户都不对应 ──
+    user: "10001:10001"
+
+    # ── 文件系统：容器内可写（朋友能自由装东西），可写层随容器重建清空 ──
+    #   真正挡住宿主机文件的是「没有任何 bind mount」+ cap_drop + 非 root uid，
+    #   和根目录只读与否无关。
+    tmpfs:
+      - /tmp:rw,nosuid,size=1g
+    volumes:
+      # 身份、会话、refreshToken 全在这里。必须是命名卷，绝不要 bind mount 到宿主机家目录
+      - mirasim-home:/home/agent
+      # agent 干活的工作区，同样用命名卷
+      - agent-work:/home/agent/work
+
+    # ── 能力：默认 capability 全丢，禁止提权 ──
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+
+    # ── 资源：给 agent 一个硬天花板 ──
+    pids_limit: 2048
+    mem_limit: 6g
+    memswap_limit: 6g
+    cpus: 2.0
+    shm_size: 256m
+
+    environment:
+      TZ: ${TZ:-Asia/Shanghai}
+      MIRASIM_PORT: "4939"
+      # headless 环境没有 keyring，登录态必然是明文，这是产品行为，不是配置失误
+      MIRASIM_SECRET_STORE: "off"
+
+    # 只绑回环，给本地 Web UI 用。接入云端是出站长连接，不依赖这条映射。
+    ports:
+      - "127.0.0.1:${MIRASIM_HOST_PORT:-4939}:4939"
+
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS --max-time 3 http://127.0.0.1:4939/ >/dev/null"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+    networks:
+      - egress
+
+networks:
+  egress:
+    name: mirasim-net
+
+volumes:
+  mirasim-home:
+    name: mirasim-home
+  agent-work:
+    name: mirasim-work
