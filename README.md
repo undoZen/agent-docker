@@ -267,6 +267,10 @@ make url      # → http://127.0.0.1:4939/?token=xxxxxxxx
 `x-mirasim-token` 头。前端读到 `?token=` 后会存进 sessionStorage 并把地址栏里的 token 抹掉，
 所以同一标签页内刷新无感；**关掉标签页再打开就要重新 `make url` 一次**。
 
+`/api/state`（普通 HTTP）和 `/ws`（WebSocket）用的是**同一个监听端口、同一套鉴权中间件**，
+两条 401 是同一个原因，不要分开排查。WS 客户端本来就是带 token 连的：
+`ws://127.0.0.1:<port>/ws?token=<token>`。
+
 两个别走错方向的猜测：
 
 - **改成 `network_mode: host` 没用**。回环来源走的是另一条分支，同样校验 local token，一样要带。
