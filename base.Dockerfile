@@ -113,6 +113,23 @@ RUN if [ "$WITH_RUST" = "1" ]; then \
       /opt/rust/cargo/bin/cargo --version; \
     fi
 
+# Debian 的 /etc/profile 会把 PATH 重置成系统默认值，而 login shell（bash -l / bash -lc）
+# 一定会读它。结果是 /opt/agents、/usr/local/go、/opt/rust 这三条被冲掉，
+# 表现就是 claude / go / cargo 全部 command not found，而 python3、node 正常
+# （它们本来就在 /usr/bin）。/etc/profile 末尾会 source /etc/profile.d/*.sh，
+# 在这里把三条补回去，login shell 也就正常了。
+RUN printf '%s\n' \
+      'PATH="/opt/agents/bin:/usr/local/go/bin:/opt/rust/cargo/bin:$PATH"' \
+      'export PATH' \
+      > /etc/profile.d/10-agent-paths.sh \
+ && chmod 0644 /etc/profile.d/10-agent-paths.sh \
+ && printf '%s\n' \
+      '' \
+      '# agent-docker: login shell 里补回工具链路径（/etc/profile 会重置 PATH）' \
+      '. /etc/profile.d/10-agent-paths.sh' \
+      >> /home/agent/.profile \
+ && chown 10001:10001 /home/agent/.profile
+
 # 故意不设 ENTRYPOINT：docker run -it 进来就是 bash，当普通 Linux 用。
 # 各变体自己定义 ENTRYPOINT 覆盖这个 CMD。
 USER 10001:10001

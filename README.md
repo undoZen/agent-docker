@@ -51,16 +51,52 @@ entrypoint 每 5 秒轮询一次登录态，看到就自己开始 serve。
 make mirasim MIRASIM_VERSION=0.0.622 && make up
 ```
 
-## base 单独用
+## base 单独用：直接跑 claude code
 
-base 没有 ENTRYPOINT，`docker run` 进来就是 bash，可以当普通 Linux 使：
+`compose.agent.yml` 把 base 起成一个「装机即用」的 claude code 容器，硬化参数和变体那套一致：
+
+```bash
+make claude          # 进 claude code
+make claude-shell    # 只要一个带工具链的 bash
+```
+
+第一次会走登录：它打印一个链接，你在宿主机浏览器里打开授权，把回来的码贴进去。
+登录态存在 `agent-home` 卷里，之后每次 `make claude` 直接进，不用再登。
+
+想让它在**你自己的项目**上干活：
+
+```bash
+WORKSPACE=~/code/myproj make claude
+```
+
+⚠️ 容器里是 uid 10001。宿主机目录的属主如果是你（uid 1000），它只能读、不能写：
+
+```bash
+sudo chown -R 10001:10001 ~/code/myproj   # 代价：之后你在宿主机上编辑也得用 sudo
+```
+
+所以更省事的做法是用默认的命名卷，产物用 `docker cp` 取出来：
+
+```bash
+docker compose -f compose.agent.yml cp claude:/home/agent/work/out.zip ./out.zip
+```
+
+不想走交互登录就塞 API key（`.env` 已经在 `.gitignore` 里）：
+
+```bash
+echo 'ANTHROPIC_API_KEY=sk-ant-...' > .env
+```
+
+也可以完全绕开 compose：
 
 ```bash
 docker run --rm -it agent-docker:1 bash
-docker run --rm -it -v "$PWD/scratch:/home/agent/work" agent-docker:1
 ```
 
-注意这样跑**没有** compose 里的 `cap_drop: ALL`、资源限额等硬化参数，只适合调试。
+但那条路没有 `cap_drop: ALL`、资源限额、`no-new-privileges`，只适合调试，别拿它跑不受信的代码。
+
+> 关于 `--rm`：这里它只删掉会话结束后退出的那个临时容器。登录态、`.claude` 配置都在 `agent-home`
+> 卷里，删容器不影响，也没有需要自动重启的服务。
 
 ## base 的构建参数
 
@@ -117,13 +153,20 @@ compose 那边把 `image:` 和 hardening 块照抄——硬化参数是跟着**�
 - **`NPM_CONFIG_PREFIX=/opt/agents`**，`npm install -g` 免 sudo
 - **`fd-find` 已软链成 `fd`**（Debian 里的命令名是 `fdfind`）
 
-## 两个必须记住的坑
+## 三个必须记住的坑
 
-**1. 容器里 Chromium 必须 `--no-sandbox`。**
+**1. `bash -lc` 会丢掉 PATH（已被 profile.d 兜住）。**
+Debian 的 `/etc/profile` 把 `PATH` 重置成系统默认值，login shell 一定读它。
+所以 `ENV PATH` 里那三条自定义路径会被冲掉，症状是 `claude`、`go`、`cargo` 全部
+`command not found`，而 `python3`、`node`、`chromium` 正常——因为它们本来就在 `/usr/bin`。
+镜像里写了 `/etc/profile.d/10-agent-paths.sh` 补回来；如果你自建变体又要加新路径，也往那里加，
+不要只改 `ENV PATH`。
+
+**2. 容器里 Chromium 必须 `--no-sandbox`。**
 `no-new-privileges` 让 `chrome-sandbox` 的 setuid 通道失效，Docker 默认 seccomp 又不给非特权
 user namespace，Chrome 自带的沙箱起不来。它已经在容器里了，关掉浏览器沙箱是可接受的位置。
 
-**2. 容器内写不了系统目录。**
+**3. 容器内写不了系统目录。**
 `apt install` 注定失败（uid 10001）。要装系统包改 `EXTRA_APT` 重建；
 `pip install` 要带 `--user` 或用 venv；`npm install -g` 正常可用。
 

@@ -1,0 +1,61 @@
+# 用 base 镜像直接跑 claude code，不涉及任何宿主软件。
+#
+#   make claude         进 claude code 交互界面
+#   make claude-shell   只要一个带工具链的 bash
+#
+# 想让它在你自己的项目目录里干活：
+#   WORKSPACE=~/code/myproj make claude
+# 注意宿主机目录的属主必须让容器里的 uid 10001 能写，否则只能读不能改：
+#   sudo chown -R 10001:10001 ~/code/myproj
+
+name: agent
+
+# 和 variants/mirasim 里那套硬化保持一致：非 root、丢全部 capability、无宿主挂载（除工作区）
+x-hardening: &hardening
+  platform: linux/amd64
+  user: "10001:10001"
+  init: true
+  cap_drop:
+    - ALL
+  security_opt:
+    - no-new-privileges:true
+  tmpfs:
+    - /tmp:rw,nosuid,size=1g
+  pids_limit: 2048
+  mem_limit: 6g
+  memswap_limit: 6g
+  cpus: 2.0
+  shm_size: 256m
+  logging:
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "3"
+
+services:
+  claude:
+    <<: *hardening
+    image: ${BASE_TAG:-agent-docker:1}
+    container_name: agent-claude
+    working_dir: /home/agent/work
+    stdin_open: true
+    tty: true
+    volumes:
+      # 登录态、.claude 配置、npm 缓存都在这里，删容器不丢
+      - agent-home:/home/agent
+      # 默认是命名卷；设了 WORKSPACE 就变成宿主机目录
+      - ${WORKSPACE:-agent-work}:/home/agent/work
+    environment:
+      TZ: ${TZ:-Asia/Shanghai}
+      # 不想走交互登录就用 API key：在 .env 里写 ANTHROPIC_API_KEY=sk-ant-...
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+    # 直接 exec claude，不经过 login shell。
+    # 走 `bash -lc` 的话 Debian 的 /etc/profile 会重置 PATH（镜像里已用 profile.d 兜住，
+    # 但没必要多绕一层 shell）。
+    command: ["claude"]
+
+volumes:
+  agent-home:
+    name: agent-home
+  agent-work:
+    name: agent-work

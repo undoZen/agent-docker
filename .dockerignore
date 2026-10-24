@@ -1,0 +1,7 @@
+# base 的构建上下文是仓库根目录，但 base.Dockerfile 不 COPY 任何文件。
+# 排除掉它们，避免 .git 随每次提交变化影响上下文传输。
+.git
+.gitignore
+.dockerignore
+variants
+*.md

@@ -12,7 +12,7 @@ GO_VERSION ?= latest
 MIRASIM_VERSION ?= stable
 
 .DEFAULT_GOAL := help
-.PHONY: help base mirasim all up stop logs shell login attach status config down purge egress
+.PHONY: help base mirasim all claude claude-shell up stop logs shell login attach status config down purge egress
 
 help:
 	@echo "构建"
@@ -20,7 +20,12 @@ help:
 	@echo "  make mirasim     mirasim 变体        ($(MIRASIM_TAG))，会先确保 base 存在"
 	@echo "  make all         两个都构建"
 	@echo ""
-	@echo "运行（都在 mirasim 变体上）"
+	@echo "直接用 base（不需要 mirasim）"
+	@echo "  make claude      进 claude code 交互界面"
+	@echo "  make claude-shell 只要一个带工具链的 bash"
+	@echo "  WORKSPACE=~/proj make claude   让它在你自己的目录里干活"
+	@echo ""
+	@echo "运行 mirasim 变体"
 	@echo "  make up / stop / logs / shell / config"
 	@echo ""
 	@echo "Mirasim"
@@ -41,6 +46,14 @@ mirasim: base
 
 all: mirasim
 	@echo "完成：$(BASE_TAG) + $(MIRASIM_TAG)"
+
+# 用 base 直接跑 claude code。这里的 --rm 只删掉这次会话结束后退出的临时容器，
+# 登录态和配置都在 agent-home 卷里，删容器不影响。别跟服务容器的 restart 策略混为一谈。
+claude:
+	docker compose -f compose.agent.yml run --rm claude
+
+claude-shell:
+	docker compose -f compose.agent.yml run --rm claude bash
 
 up:
 	cd $(VARIANT) && docker compose up -d
