@@ -61,6 +61,7 @@ RUN set -eu; \
     rm -rf /tmp/mirasim.tar.xz /tmp/unpack
 
 COPY --chmod=0755 entrypoint.sh /usr/local/bin/entrypoint.sh
+COPY --chmod=0644 forward-proxy.js /usr/local/lib/mirasim-forward-proxy.js
 
 # 身份按「名字」回指，不写数字、也不引变量：
 # `agent` 这个用户在 base 里是用 AGENT_UID/AGENT_GID 建出来的，

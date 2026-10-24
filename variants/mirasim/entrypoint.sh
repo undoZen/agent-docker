@@ -61,9 +61,22 @@ fi
 # 让转发器在容器内重新发起连接，对端就永远是 127.0.0.1，语义回到「本机」。
 # 配合 compose 里的 MIRASIM_SERVER_HOST=127.0.0.1：serve 自己不再绑容器 eth0，
 # 对外只剩这一个入口。
+#
+# 优先用 forward-proxy.js：除了转发，还把 ?token= 换成 HttpOnly cookie，之后每个
+# 请求自动补 x-mirasim-token —— 前端只给 /ws 带 token，没有这一步 /api/* 恒 401、
+# 网页上的配对恒 403。没有 node 才退回 socat（只转发，不补 token）。
 # 代价：任何能连到这个 docker 网络的人，其请求都会被当作本机请求（仍需 token）。
+FORWARD_PROXY="/usr/local/lib/mirasim-forward-proxy.js"
 if [ -n "${MIRASIM_FORWARD_PORT:-}" ]; then
-  if command -v socat >/dev/null 2>&1; then
+  if command -v node >/dev/null 2>&1 && [ -r "$FORWARD_PROXY" ]; then
+    forward() {
+      while :; do
+        node "$FORWARD_PROXY" \
+          || { echo "⚠ 转发器退出（${MIRASIM_FORWARD_PORT} 被占用？），1 秒后重试" >&2; sleep 1; }
+      done
+    }
+    forward &
+  elif command -v socat >/dev/null 2>&1; then
     forward() {
       while :; do
         # backlog 默认只有 5，而网页一次加载会并发拉一堆资源 + 一条 WS，
@@ -74,9 +87,9 @@ if [ -n "${MIRASIM_FORWARD_PORT:-}" ]; then
       done
     }
     forward &
-    echo "→ 转发已启动：容器 :${MIRASIM_FORWARD_PORT} → 127.0.0.1:${MIRASIM_PORT}（对端恒为回环）"
+    echo "→ 转发已启动（socat，不补 token）：容器 :${MIRASIM_FORWARD_PORT} → 127.0.0.1:${MIRASIM_PORT}"
   else
-    echo "⚠ 没装 socat，跳过转发；此时只能从容器内部访问 Web UI" >&2
+    echo "⚠ 没有 node 也没有 socat，跳过转发；此时只能从容器内部访问 Web UI" >&2
   fi
 fi
 

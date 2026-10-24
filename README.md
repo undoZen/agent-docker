@@ -263,8 +263,9 @@ base      ARG AGENT_UID → useradd --uid     ← 固化进 /etc/passwd
 > **服务端只认 `?token=` 和 `Authorization: Bearer`，不读 cookie；
 > 而前端只给 `/ws` 拼 token，其余请求一个都不带。**
 >
-> 所以：网页能不能用，取决于 `/ws` 那把 token 对不对；`/api/*` 的 401 是结构性的，
-> 改配置改不掉。
+> 所以单靠改 mirasim 的配置，`/api/*` 的 401 和网页配对的 403 都去不掉。
+> 本仓库的解法是容器入口的 `forward-proxy.js`：用 `?token=` 换一个 HttpOnly cookie，
+> 之后每个请求由它补上 `x-mirasim-token`（见「容器里那个转发器」一节）。
 
 ### 服务端怎么判定一个请求
 
@@ -340,11 +341,13 @@ function fV(e,t){ if(t?.mode!=="direct"||!t.host) return e; … }
 `fetch(fV("/api/state", t))`、`fetch("/mirachannel/pair")` 都是这一路。
 **你在 DevTools 里找不到 token 是正常的 —— 代码里就没有。**
 
-页面主体数据走 WebSocket，所以：
+页面主体数据走 WebSocket。没有转发器补 token 时：
 
 - `/ws` 连上 → 网页正常用
 - `/api/state` 401 → 顶栏版本号取不到，附带弹一个连接提示，不影响干活
-- `/mirachannel/pair` 403 → 见下面，结构性的
+- `/mirachannel/pair` 403 → 见下面
+
+经过 `forward-proxy.js` 之后这两个都是 200。
 
 ### 所以正确的用法是
 
@@ -360,7 +363,7 @@ make url            # → http://127.0.0.1:4939/?token=xxxx
 - **换了 token / 重建过容器之后，旧标签页刷多少次都是 401**，必须关掉重开
 - 直接翻浏览器历史里那个地址也不行 —— token 早被 `replaceState` 删了
 
-### `/mirachannel/pair` 的 403 是结构性的
+### `/mirachannel/pair` 为什么 403（前端的问题）
 
 ```js
 ax = req => {
@@ -375,10 +378,11 @@ ax = req => {
 `rUe` 第一行就是 `if(!a2||!b3) return false`。前端那行是裸的 `fetch("/mirachannel/pair")`，
 **query 和 header 都不带** → `got` 恒为 `undefined` → 恒 false。
 
-所以网页上那个「把设备加到这台机器」的按钮，在浏览器里**从来就不可能成功** ——
-不是网络、不是转发、不是 token 没设对。它大概是给桌面壳用的（那里能注入 header）。
+所以直连 serve 时，网页上那个「把设备加到这台机器」的按钮**从来就不可能成功** ——
+不是网络、不是 token 没设对。它大概是给桌面壳用的（那里能注入 header）。
+经过 `forward-proxy.js` 就能用了，因为 header 由转发器补上。
 
-要配对就用容器内发请求，源地址天然是 127.0.0.1，token 我们补上：
+也可以绕开网页，在容器内发请求，源地址天然是 127.0.0.1，token 我们补上：
 
 ```bash
 make pair     # → {"ok":true, "code":"…", "hint":"paste the connection code into a client"}
@@ -386,7 +390,7 @@ make pair     # → {"ok":true, "code":"…", "hint":"paste the connection code 
 
 把 `code` 粘到客户端。
 
-### 容器里那个 socat 转发器是干什么的
+### 容器里那个转发器是干什么的
 
 serve 直接用 `--port` 监听时，**没有** `--host` 的话还会额外起一个「局域网直连」监听器，
 绑到容器自己的 eth0（`172.x.0.2`）上。compose 给了 `MIRASIM_SERVER_HOST=127.0.0.1`，
@@ -395,7 +399,7 @@ serve 直接用 `--port` 监听时，**没有** `--host` 的话还会额外起�
 拓扑：
 
 ```
-宿主机 127.0.0.1:4939 ──► 容器 :4938 (socat) ──► 127.0.0.1:4939 (serve)
+宿主机 127.0.0.1:4939 ──► 容器 :4938 (forward-proxy.js) ──► 127.0.0.1:4939 (serve)
                                                   对端恒为 127.0.0.1
 ```
 
@@ -403,6 +407,16 @@ serve 直接用 `--port` 监听时，**没有** `--host` 的话还会额外起�
 （`172.x.0.1`）→ `RD()` 为 false → 判成 `network` → 要 **access token**。
 那时你拿 local token 去访问，报的是 `missing/bad access token`，方向就全错了。
 转一道之后对端恒为 `127.0.0.1`，服务端才按 `loopback` 处理，你要的那把 local token 才是对的。
+
+转发器（`variants/mirasim/forward-proxy.js`，镜像里有 node 就用它，否则退回 socat）
+同时补 token：
+
+1. 请求带了正确的 `?token=`（就是 `make url` 打开的那一下）→ 种 HttpOnly cookie `mirasim_local_token`
+2. 带这个 cookie 的请求 → 补上 `x-mirasim-token` 头；WebSocket 只认 query，就补 `?token=`
+3. 两者都没有 → 原样转发，serve 照常拒绝
+
+没有 token 的人拿不到 cookie，所以认证强度没变。cookie 不像 sessionStorage 那样分标签页，
+同一浏览器里重开标签页也能用；换了 token 之后重新打开一次 `make url` 即可。
 
 代价：**任何能连到这个 docker 网络的人，请求都被当成「本机」**。token 仍然校验，
 但「来自本机」这层信任没有了，所以别把不受信的容器塞进 `mirasim-net`。
@@ -420,7 +434,7 @@ serve 直接用 `--port` 监听时，**没有** `--host` 的话还会额外起�
 
 ```bash
 docker compose -f variants/mirasim/docker-compose.yml exec mirasim ss -ltnp
-# LISTEN 0.0.0.0:4938        ← socat 转发器（容器唯一的对外入口）
+# LISTEN 0.0.0.0:4938        ← 转发器 node（容器唯一的对外入口）
 # LISTEN 127.0.0.1:4939      ← serve 本体
 # LISTEN 127.0.0.11:xxxxx    ← docker 内嵌 DNS，无关
 ```

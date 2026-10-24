@@ -172,6 +172,7 @@ url: token
 #   }
 # 前端那行是裸的 `fetch("/mirachannel/pair")` —— query 和 header 都不带，
 # 所以 got 恒为 undefined，rUe 恒为 false，403 是结构性的。
+# （经过 forward-proxy.js 时转发器会补 header，网页按钮也能用了。）
 # 这里在容器内部发请求：源地址是 127.0.0.1（满足前半段），token 由我们补上。
 pair: token
 	@tok=$$(sed -n 's/^MIRASIM_LOCAL_TOKEN=//p' "$(MIRASIM_ENV)" | tr -d '\r\n'); \
