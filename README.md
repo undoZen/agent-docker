@@ -273,8 +273,21 @@ make url      # → http://127.0.0.1:4939/?token=xxxxxxxx
 
 两个别走错方向的猜测：
 
-- **改成 `network_mode: host` 没用**。回环来源走的是另一条分支，同样校验 local token，一样要带。
+- **不要改成 `network_mode: host`**。原因不只是「回环也要 token」，而是它**逐个地址监听**：
+  在容器里 `ss -ltnp` 能看到它绑了 `127.0.0.1`、`::1`，以及容器自己的 `172.20.0.2`——不是 `0.0.0.0`。
+  换成 host 网络后，这份清单里就会多出宿主机的 `192.168.x.x` 之类，等于把一个只靠 token
+  保护的界面摆到局域网上。
 - **不要为了省事把端口绑到 `0.0.0.0`**。token 在 URL 里，等于凭据；现在绑 `127.0.0.1` 才是安全的。
+
+判断「我有没有被别人摸到」的体检命令（容器里装了 iproute2）：
+
+```bash
+docker compose -f variants/mirasim/docker-compose.yml exec mirasim ss -ltnp
+# LISTEN 127.0.0.1:4939     ← 服务本体
+# LISTEN 172.20.0.2:4939    ← 容器自己的 eth0，宿主经端口映射就是从这进来的
+# LISTEN [::1]:4939
+# LISTEN 127.0.0.11:43041   ← docker 内嵌 DNS，跟这事无关
+```
 
 ### 例外：`/mirachannel/pair` 会 403，而且带 token 也解不开
 
