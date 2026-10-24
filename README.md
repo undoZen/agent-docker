@@ -276,6 +276,33 @@ make url      # → http://127.0.0.1:4939/?token=xxxxxxxx
 - **改成 `network_mode: host` 没用**。回环来源走的是另一条分支，同样校验 local token，一样要带。
 - **不要为了省事把端口绑到 `0.0.0.0`**。token 在 URL 里，等于凭据；现在绑 `127.0.0.1` 才是安全的。
 
+### 例外：`/mirachannel/pair` 会 403，而且带 token 也解不开
+
+网页上那个「把设备加到这台机器」的按钮会调 `/mirachannel/pair`，返回：
+
+```json
+{"ok":false,"error":"pairing is only available from this machine"}
+```
+
+这不是缺 token，是**先判来源再判 token**：
+
+```js
+if (!isLoopback(peer.address)) return false;   // ← 不是回环就直接拒
+return equal(token, localToken);
+```
+
+上游的文档串写明理由：这些接口（`pair`、`remote`、`getDevices`、`mintEnrollment`）决定
+「谁可以连上这台机器」，不能让远程对端读到名单、更不能让远程对端给自己发一张加入许可。
+所以经 docker 端口映射进来的请求（源 IP 是网桥网关）永远过不去，也没有环境变量可以放宽。
+
+要配对就在容器内部发请求，源地址就是 127.0.0.1：
+
+```bash
+make pair     # 打印 {"ok":true,"code":"…","hint":"paste the connection code into a client"}
+```
+
+把返回里的 `code` 粘到客户端即可。
+
 ## 三个必须记住的坑
 
 **1. `bash -lc` 会丢掉 PATH（已被 profile.d 兜住）。**

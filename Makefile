@@ -18,7 +18,7 @@ AGENT_UID ?= $(shell id -u)
 AGENT_GID ?= $(shell id -g)
 
 .DEFAULT_GOAL := help
-.PHONY: help base mirasim all claude claude-shell up stop logs shell login attach status config down purge egress who check-uid url
+.PHONY: help base mirasim all claude claude-shell up stop logs shell login attach status config down purge egress who check-uid url pair
 
 help:
 	@echo "构建"
@@ -36,6 +36,7 @@ help:
 	@echo ""
 	@echo "Mirasim"
 	@echo "  make url         打印带 token 的本地 Web UI 地址（网页 401 就是这个）"
+	@echo "  make pair        取连接码，把桌面 App / 手机加到这台机器（网页上那个按钮会 403）"
 	@echo "  make login       交互登录，要 -it，会问邮箱和邮件验证码"
 	@echo "  make attach      打开「接入云端」"
 	@echo "  make status      看接入状态"
@@ -118,6 +119,22 @@ url:
 	  exit 1; \
 	fi; \
 	printf 'http://127.0.0.1:%s/?token=%s\n' "$${MIRASIM_HOST_PORT:-4939}" "$$tok"
+
+# 取「连接码」，用于把一台客户端（桌面 App / 手机）加到这台机器上。
+# /mirachannel/pair 和 /mirachannel/remote 都是 TRUSTED-ONLY：先判来源是不是回环，
+# 再比 token —— 不是回环直接 403 "pairing is only available from this machine"，
+# 带什么 token 都没用。而经 docker 端口映射进来的请求源 IP 是网桥网关，永远过不了。
+# 这里在容器内部发请求，源地址就是 127.0.0.1，所以能拿到；把返回里的连接码
+# 粘到客户端即可。
+pair:
+	@tok=$$(cd $(VARIANT) && docker compose exec -T mirasim cat /home/agent/.mirasim/run/local-4939.token 2>/dev/null | tr -d '\r\n'); \
+	if [ -z "$$tok" ]; then \
+	  echo "拿不到 token：容器没在跑，或 serve 还没起来（先 make up）"; \
+	  exit 1; \
+	fi; \
+	cd $(VARIANT) && docker compose exec -T mirasim \
+	  curl -sS "http://127.0.0.1:4939/mirachannel/pair?token=$$tok"; \
+	echo
 
 down:
 	cd $(VARIANT) && docker compose down
