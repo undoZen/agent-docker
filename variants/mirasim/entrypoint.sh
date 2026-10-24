@@ -11,6 +11,14 @@ export MIRASIM_SECRET_STORE="${MIRASIM_SECRET_STORE:-off}"
 # 这里只做前置加固，不要整体覆盖 —— 否则 go / cargo 会消失。
 export PATH="/opt/agents/bin:$PATH"
 
+# 家目录是命名卷，镜像里任何以 root 留下的痕迹都会跟着卷固化，之后 agent 就写不了。
+# 最典型的是构建期 npm 缓存（root 所有的 ~/.npm）——表现为 npm ERR! EACCES
+# .../_cacache。这里提前点出来，并给出可以直接复制的修法。
+if [ -e "$HOME/.npm" ] && [ ! -w "$HOME/.npm" ]; then
+  echo "⚠ $HOME/.npm 不可写（属主 $(ls -ld "$HOME/.npm" | awk '{print $3}')，当前 uid $(id -u)）：npm 会报 EACCES" >&2
+  echo "  修：docker compose exec -u root mirasim chown -R $(id -u):$(id -g) $HOME/.npm" >&2
+fi
+
 MIRASIM_BIN="/opt/mirasim/mirasim"
 
 # ── 固定 local access token ────────────────────────────────────────

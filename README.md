@@ -342,7 +342,7 @@ token 仍然要校验，但「来自本机」这层信任没有了。所以别�
 不想要转发器：删掉 compose 里的 `MIRASIM_FORWARD_PORT`，把 ports 改回 `…:4939` 即可。
 此时网页能看、配对接口 403，用 `make pair` 取码。
 
-## 三个必须记住的坑
+## 四个必须记住的坑
 
 **1. `bash -lc` 会丢掉 PATH（已被 profile.d 兜住）。**
 Debian 的 `/etc/profile` 把 `PATH` 重置成系统默认值，login shell 一定读它。
@@ -358,6 +358,32 @@ user namespace，Chrome 自带的沙箱起不来。它已经在容器里了，�
 **3. 容器内写不了系统目录。**
 `apt install` 注定失败（非 root 用户）。要装系统包改 `EXTRA_APT` 重建；
 `pip install` 要带 `--user` 或用 venv；`npm install -g` 正常可用。
+
+**4. 家目录是卷，镜像里 root 留下的东西会被卷就地固化。**
+`/home/agent` 挂成命名卷时，**卷第一次创建**会把镜像里该目录的内容复制进去，
+之后镜像怎么改都不再影响这个卷。所以构建期一旦以 root 往家目录写过东西，毒就留住了。
+
+真实踩过的例子：`ENV HOME=/home/agent` 之后、还没有 `USER` 切换时跑 `npm install`，
+npm 的缓存落进 `/home/agent/.npm`（root 所有）；这个目录随卷固化，容器里的 agent 从此
+写不了自己的 npm 缓存——
+
+```
+npm ERR! code EACCES
+npm ERR! path /home/agent/.npm/_cacache/tmp/xxxxx
+npm ERR! Your cache folder contains root-owned files, due to a bug in
+npm ERR! previous versions of npm which has since been addressed.
+```
+
+最后那两行是 npm 的通用文案，会把人带偏；真实原因在这里。镜像已经改成构建期
+`--cache /tmp/...` 并在最后一层 `chown -R` 一次，新卷不会有这问题。**已有的卷**
+要一次性修（保留登录态）：
+
+```bash
+docker compose -f variants/mirasim/docker-compose.yml exec -u root mirasim \
+  chown -R 1000:1000 /home/agent
+```
+
+一句话：家目录凡是会挂卷的，构建期就别以 root 往里写；写了必须在最后一层 chown 回来。
 
 ## 和旧的 `mirasim-docker/` 的关系
 

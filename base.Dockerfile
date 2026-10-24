@@ -100,14 +100,21 @@ RUN set -eu; \
 # agent CLI 装在 /opt/agents（家目录之外）。
 # 放进家目录的话，一旦该目录被挂成卷，卷初始化之后就不会再随镜像更新。
 # 目录对 agent 可写，所以容器里也能 `npm install -g <pkg>` 自由加 CLI。
+#
+# --cache /tmp/... 是必须的：ENV HOME=/home/agent 之后，以 root 跑的 npm 会把缓存
+# 写到 /home/agent/.npm（root 所有）。而家目录挂成卷时，卷第一次创建会把这些文件
+# 复制进去，于是容器里的 agent 永远写不了自己的 npm 缓存 —— 表现为
+# "npm ERR! EACCES ... /home/agent/.npm/_cacache"。构建期把缓存丢到 /tmp 就不会有这层污染。
 RUN mkdir -p /opt/agents \
  && if [ -n "$AGENT_CLIS" ]; then \
       echo "==> install agent CLIs: $AGENT_CLIS"; \
-      npm install -g --prefix /opt/agents --no-fund --no-audit $AGENT_CLIS; \
+      npm install -g --prefix /opt/agents --cache /tmp/npm-build-cache \
+        --no-fund --no-audit $AGENT_CLIS; \
     else \
       echo "==> 未指定 AGENT_CLIS：镜像里不会有任何 agent CLI" >&2; \
     fi \
- && chown -R ${AGENT_UID}:${AGENT_GID} /opt/agents
+ && chown -R ${AGENT_UID}:${AGENT_GID} /opt/agents \
+ && rm -rf /tmp/npm-build-cache
 
 # ── Go：官方静态 tarball，版本与 sha256 都从 go.dev 的 JSON feed 取 ──
 RUN if [ "$WITH_GO" = "1" ]; then \
@@ -160,7 +167,7 @@ RUN printf '%s\n' \
       '# agent-docker: login shell 里补回工具链路径（/etc/profile 会重置 PATH）' \
       '. /etc/profile.d/10-agent-paths.sh' \
       >> /home/agent/.profile \
- && chown ${AGENT_UID}:${AGENT_GID} /home/agent/.profile
+ && chown -R ${AGENT_UID}:${AGENT_GID} /home/agent
 
 # 故意不设 ENTRYPOINT：docker run -it 进来就是 bash，当普通 Linux 用。
 # 各变体自己定义 ENTRYPOINT 覆盖这个 CMD。
