@@ -48,19 +48,28 @@ services:
     environment:
       TZ: ${TZ:-Asia/Shanghai}
       MIRASIM_PORT: "4939"
+      # 显式指定绑定地址。不指定的话 serve 会额外启动一个「局域网直连」监听器，
+      # 把容器自己的 eth0（172.x.0.2）也绑上 —— 那条路绕过转发器，回环语义就没了。
+      # 显式给 --host（这个变量等价）之后，另一个监听器整个不会启动。
+      MIRASIM_SERVER_HOST: "127.0.0.1"
+      # 转发器的监听端口，是容器唯一的对外入口；下面的 ports 映射到它。
+      MIRASIM_FORWARD_PORT: "4938"
       # headless 环境没有 keyring，登录态必然是明文，这是产品行为，不是配置失误
       MIRASIM_SECRET_STORE: "off"
 
-    # 只绑回环，给本地 Web UI 用。接入云端是出站长连接，不依赖这条映射。
+    # 只绑回环。宿主机 → 4938（转发器）→ 127.0.0.1:4939（serve），
+    # 这样 serve 看到的对端永远是本机。接入云端是出站长连接，不依赖这条映射。
     ports:
-      - "127.0.0.1:${MIRASIM_HOST_PORT:-4939}:4939"
+      - "127.0.0.1:${MIRASIM_HOST_PORT:-4939}:4938"
 
     healthcheck:
-      test: ["CMD-SHELL", "curl -fsS --max-time 3 http://127.0.0.1:4939/ >/dev/null"]
+      # 回环来源也要 token，所以健康检查得带上，否则永远 401。
+      # 走 serve 自己的 4939，不经过转发器，少一层依赖。
+      test: ["CMD-SHELL", 'curl -fsS --max-time 3 -o /dev/null "http://127.0.0.1:4939/?token=$$(cat /home/agent/.mirasim/run/local-4939.token 2>/dev/null)"']
       interval: 30s
       timeout: 5s
       retries: 3
-      start_period: 60s
+      start_period: 120s
 
     logging:
       driver: json-file

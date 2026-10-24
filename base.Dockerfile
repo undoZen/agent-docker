@@ -52,7 +52,7 @@ RUN apt-get update \
       xz-utils tar zip unzip rsync file coreutils \
       jq less procps tree sqlite3 \
       ripgrep fd-find \
-      bind9-dnsutils iproute2 netcat-openbsd \
+      bind9-dnsutils iproute2 netcat-openbsd socat \
       libssl-dev zlib1g-dev libffi-dev libbz2-dev liblzma-dev \
       libreadline-dev libyaml-dev libsqlite3-dev \
       libxml2-dev libxslt1-dev libjpeg-dev libpng-dev libpq-dev \

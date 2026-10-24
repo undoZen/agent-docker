@@ -13,6 +13,30 @@ export PATH="/opt/agents/bin:$PATH"
 
 MIRASIM_BIN="/opt/mirasim/mirasim"
 
+# ── 前置转发器（可选）───────────────────────────────────────────────
+# 为什么需要：serve 的对端判定只看 TCP 源地址。经 docker 端口映射进来的请求，
+# 源地址是网桥网关（172.x.0.1），于是被当成远程 —— 回环限制的接口（/mirachannel/pair、
+# /remote、getDevices…）直接 403，普通接口则要求 access token。
+# 让转发器在容器内重新发起连接，对端就永远是 127.0.0.1，语义回到「本机」。
+# 配合 compose 里的 MIRASIM_SERVER_HOST=127.0.0.1：serve 自己不再绑容器 eth0，
+# 对外只剩这一个入口。
+# 代价：任何能连到这个 docker 网络的人，其请求都会被当作本机请求（仍需 token）。
+if [ -n "${MIRASIM_FORWARD_PORT:-}" ]; then
+  if command -v socat >/dev/null 2>&1; then
+    forward() {
+      while :; do
+        socat "TCP-LISTEN:${MIRASIM_FORWARD_PORT},fork,reuseaddr" \
+              "TCP:127.0.0.1:${MIRASIM_PORT}" 2>/dev/null \
+          || { echo "⚠ socat 转发退出（${MIRASIM_FORWARD_PORT} 被占用？），1 秒后重试" >&2; sleep 1; }
+      done
+    }
+    forward &
+    echo "→ 转发已启动：容器 :${MIRASIM_FORWARD_PORT} → 127.0.0.1:${MIRASIM_PORT}（对端恒为回环）"
+  else
+    echo "⚠ 没装 socat，跳过转发；此时只能从容器内部访问 Web UI" >&2
+  fi
+fi
+
 if [ -z "${1:-}" ]; then
   set -- serve
 fi
