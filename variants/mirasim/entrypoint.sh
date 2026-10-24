@@ -25,7 +25,9 @@ if [ -n "${MIRASIM_FORWARD_PORT:-}" ]; then
   if command -v socat >/dev/null 2>&1; then
     forward() {
       while :; do
-        socat "TCP-LISTEN:${MIRASIM_FORWARD_PORT},fork,reuseaddr" \
+        # backlog 默认只有 5，而网页一次加载会并发拉一堆资源 + 一条 WS，
+        # 峰值时会被内核丢连接（偶发白屏、刷新又好）。抬到 128。
+        socat "TCP-LISTEN:${MIRASIM_FORWARD_PORT},fork,reuseaddr,backlog=128" \
               "TCP:127.0.0.1:${MIRASIM_PORT}" 2>/dev/null \
           || { echo "⚠ socat 转发退出（${MIRASIM_FORWARD_PORT} 被占用？），1 秒后重试" >&2; sleep 1; }
       done
