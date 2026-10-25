@@ -55,6 +55,13 @@ RUN set -eu; \
       if [ -e "/tmp/unpack/$e" ]; then cp -a "/tmp/unpack/$e" "$MIRASIM_INSTALL_DIR/"; fi; \
     done; \
     printf '%s\n' "$ver" > "$MIRASIM_INSTALL_DIR/VERSION"; \
+    # node-pty 打包在 mirasim（Node SEA）的内嵌 asset 里，每次启动时解压到
+    # dirname(execPath)/node_modules/node-pty，失败则 catch 吞掉、不报错。
+    # 运行时用户是 agent，下面又把整个目录设成只读，所以必须在这里以 root
+    # 跑一次让它解压好；之后启动比对 .mirasim-stamp 一致就不再写。
+    "$MIRASIM_INSTALL_DIR/mirasim" help >/dev/null 2>&1 || true; \
+    test -f "$MIRASIM_INSTALL_DIR/node_modules/node-pty/prebuilds/linux-x64/pty.node" \
+      || { echo "node-pty 没有解压出来" >&2; exit 1; }; \
     chmod -R a-w,a+rX "$MIRASIM_INSTALL_DIR"; \
     chmod a+rx "$MIRASIM_INSTALL_DIR/mirasim"; \
     ln -sf "$MIRASIM_INSTALL_DIR/mirasim" /usr/local/bin/mirasim; \
