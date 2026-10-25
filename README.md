@@ -411,12 +411,17 @@ serve 直接用 `--port` 监听时，**没有** `--host` 的话还会额外起�
 转发器（`variants/mirasim/forward-proxy.js`，镜像里有 node 就用它，否则退回 socat）
 同时补 token：
 
-1. 请求带了正确的 `?token=`（就是 `make url` 打开的那一下）→ 种 HttpOnly cookie `mirasim_local_token`
-2. 带这个 cookie 的请求 → 补上 `x-mirasim-token` 头；WebSocket 只认 query，就补 `?token=`
-3. 两者都没有 → 原样转发，serve 照常拒绝
+1. 请求带了 `?token=` 或 cookie → 拿它去 serve 的 `/api/state` 实际问一次，200 才算对（按 token 缓存几秒）。
+   不在本地和 `MIRASIM_LOCAL_TOKEN` 比，因为 serve 实际用哪把钥匙只有它自己说了算
+2. 对了 → 补上 `x-mirasim-token` 头（WebSocket 只认 query，就补 `?token=`）；带的是 `?token=`
+   （就是 `make url` 打开的那一下）还会种 HttpOnly cookie `mirasim_local_token`
+3. 直接带 `x-mirasim-token` / `Authorization: Bearer` 的客户端 → 原样转发，serve 自己验
+4. 都没有、或 token 被 serve 拒了 → 不转发，直接回 401 和一个说明页，提示去 `make url` 拿地址；
+   WebSocket 升级请求直接 401 断开
 
 没有 token 的人拿不到 cookie，所以认证强度没变。cookie 不像 sessionStorage 那样分标签页，
-同一浏览器里重开标签页也能用；换了 token 之后重新打开一次 `make url` 即可。
+同一浏览器里重开标签页也能用；但它是会话 cookie，关掉浏览器就没了，看到 401 说明页时
+重新打开一次 `make url` 即可（换了 token 之后也一样）。
 
 代价：**任何能连到这个 docker 网络的人，请求都被当成「本机」**。token 仍然校验，
 但「来自本机」这层信任没有了，所以别把不受信的容器塞进 `mirasim-net`。
